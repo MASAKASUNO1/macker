@@ -33,6 +33,7 @@ usage:
   macker agent                      run the node daemon
   macker collector                  run the event collector daemon
   macker context [ls|use <name>]    show or switch the active context
+  macker completion zsh             print the zsh tab-completion script
   macker version                    print version
 
   (macker attach / kill <node>:<session> also work explicitly)
@@ -83,6 +84,10 @@ func Main(args []string) int {
 	case "version":
 		fmt.Println("macker", Version)
 		return 0
+	case "completion":
+		err = cmdCompletion(rest)
+	case "__complete":
+		err = cmdComplete(ctx, rest)
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 		return 0

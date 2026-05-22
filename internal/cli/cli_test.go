@@ -2,6 +2,7 @@ package cli
 
 import (
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -135,5 +136,16 @@ func TestIsAutoSession(t *testing.T) {
 		if isAutoSession(n) {
 			t.Errorf("isAutoSession(%q) = true, want false", n)
 		}
+	}
+}
+
+func TestZshCompletionScript(t *testing.T) {
+	for _, want := range []string{"#compdef macker", "_macker()", "compdef _macker macker", "__complete nodes", "__complete sessions"} {
+		if !strings.Contains(zshCompletionScript, want) {
+			t.Errorf("zsh completion script missing %q", want)
+		}
+	}
+	if len(completionSubcommands) == 0 {
+		t.Error("completionSubcommands is empty")
 	}
 }

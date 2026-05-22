@@ -103,9 +103,12 @@ func BearerToken(r *http.Request) string {
 }
 
 // Resolve determines the capability of the caller behind r. localToken, when
-// non-empty, is required of loopback callers. ts may be nil (then only loopback
-// can be authorized).
-func Resolve(ts *tailnet.Client, policy config.Policy, localToken string, r *http.Request) Peer {
+// non-empty, is required of loopback callers. selfLogin, when non-empty, is
+// this node's own tailnet login: a remote peer with the same login is another
+// device owned by the same account and is granted CapExec, so a single owner's
+// machines trust each other without per-node config. ts may be nil (then only
+// loopback can be authorized).
+func Resolve(ts *tailnet.Client, policy config.Policy, localToken, selfLogin string, r *http.Request) Peer {
 	if IsLoopback(r.RemoteAddr) {
 		if localToken != "" && subtle.ConstantTimeCompare([]byte(BearerToken(r)), []byte(localToken)) != 1 {
 			return Peer{Cap: CapNone}
@@ -119,5 +122,9 @@ func Resolve(ts *tailnet.Client, policy config.Policy, localToken string, r *htt
 	if err != nil || id == nil {
 		return Peer{Cap: CapNone}
 	}
-	return Peer{Login: id.Login, NodeName: id.NodeName, Cap: CapabilityFor(policy, id.Login)}
+	c := CapabilityFor(policy, id.Login)
+	if selfLogin != "" && id.Login == selfLogin {
+		c = CapExec // another device owned by the same tailnet account
+	}
+	return Peer{Login: id.Login, NodeName: id.NodeName, Cap: c}
 }

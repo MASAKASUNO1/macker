@@ -23,6 +23,7 @@ type Server struct {
 	ts         *tailnet.Client
 	policy     config.Policy
 	localToken string
+	selfLogin  string        // this node's tailnet login; same-login peers get CapExec
 	audit      *eventlog.Log // optional: records authz denials on the collector node
 	node       string
 	tenant     string
@@ -36,6 +37,9 @@ func NewServer(store *Store, ts *tailnet.Client, policy config.Policy) *Server {
 
 // SetLocalToken sets the loopback auth token (same scheme as the agent).
 func (s *Server) SetLocalToken(tok string) { s.localToken = tok }
+
+// SetSelfLogin trusts other devices owned by the same tailnet account.
+func (s *Server) SetSelfLogin(login string) { s.selfLogin = login }
 
 // SetAudit enables recording of authorization denials to a local log, tagged
 // with the collector's own node/tenant. The collector is the audit hub, so its
@@ -67,7 +71,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 // requireCap enforces the shared authorization model and records denials.
 func (s *Server) requireCap(need authz.Capability, h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		p := authz.Resolve(s.ts, s.policy, s.localToken, r)
+		p := authz.Resolve(s.ts, s.policy, s.localToken, s.selfLogin, r)
 		if p.Cap < need {
 			if s.audit != nil {
 				_, _ = s.audit.Append(eventlog.Event{

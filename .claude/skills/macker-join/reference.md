@@ -32,3 +32,14 @@ Keychain も tmux サーバも見えないため不可。
   してから `load`(join.sh 再実行でも可)。
 - **collector に届かない**: collector ノードで `macker collector` が起動し、
   ポート(既定 :4478)に tailnet 越しで到達できるか確認。
+- **agent が loopback のみにバインド(他ノードから見えない)**: ログに
+  `tailnet status unavailable, binding loopback only` が出る場合、App Store 版
+  Tailscale CLI が `TERM` 未設定だと `status --json` の代わりに
+  「The Tailscale GUI failed to start」を返すのが原因。launchd は `TERM` を
+  渡さないため、plist の `EnvironmentVariables` に `TERM`(任意の値、例
+  `xterm-256color`)を入れる。join.sh は `--launchagent` 時に自動で付与する。
+- **`macker ls` の SESSIONS が `(agent?)` / `/v1/sessions 500`**: launchd の
+  最小 PATH に tmux(多くは `/opt/homebrew/bin`)が無く、agent が tmux を起動
+  できないのが原因。plist の `EnvironmentVariables` に tmux のあるディレクトリを
+  含む `PATH` を入れる。join.sh は `--launchagent` 時に tmux / tailscale /
+  macker の場所を拾って自動で付与する。

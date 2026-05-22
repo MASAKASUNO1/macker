@@ -184,7 +184,10 @@ tailnet を、状態を混ぜずにターゲットにできます:
 - **ループバック**の呼び出しはローカルオーナー(フルアクセス)。ただしローカル
   トークン(`DataDir/agent.token`、0600)の提示が必要 — 同一マシンの別ローカル
   ユーザーによる乗っ取りを防ぐ;
-- リモートピアは config の `policy` でケイパビリティが決まる:
+- **同じ tailnet アカウントが所有する別デバイス**(`tailscale whois` の login が
+  この agent 自身の login と一致)は自動で **CapExec**。自分の複数マシンは
+  per-node 設定なしで相互に exec・作成・kill できる(個人用の既定挙動);
+- それ以外のリモートピアは config の `policy` でケイパビリティが決まる:
   - `owners` / `exec_allow` → exec・作成・kill 可(CapExec);
   - `attach_allow`(空 = 任意の tailnet ピア)→ list/attach 可(CapAttach)。
 

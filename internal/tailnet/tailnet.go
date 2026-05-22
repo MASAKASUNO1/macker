@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net"
 	"os/exec"
+	"strconv"
 	"strings"
 )
 
@@ -76,6 +77,7 @@ type rawPeer struct {
 	OS           string   `json:"OS"`
 	TailscaleIPs []string `json:"TailscaleIPs"`
 	Online       bool     `json:"Online"`
+	UserID       int64    `json:"UserID"`
 }
 
 type rawStatus struct {
@@ -86,6 +88,9 @@ type rawStatus struct {
 		Name           string `json:"Name"`
 		MagicDNSSuffix string `json:"MagicDNSSuffix"`
 	} `json:"CurrentTailnet"`
+	User map[string]struct {
+		LoginName string `json:"LoginName"`
+	} `json:"User"`
 }
 
 func (p rawPeer) toNode(self bool) Node {
@@ -150,6 +155,23 @@ func (c *Client) Tenant(ctx context.Context) (string, error) {
 	}
 	if rs.MagicDNSSuffix != "" {
 		return rs.MagicDNSSuffix, nil
+	}
+	return "", nil
+}
+
+// SelfLogin returns the tailnet login that owns this node (e.g.
+// "alice@github"). It is used to auto-trust other devices owned by the same
+// account. Returns "" if it cannot be determined.
+func (c *Client) SelfLogin(ctx context.Context) (string, error) {
+	rs, err := c.status(ctx)
+	if err != nil {
+		return "", err
+	}
+	if rs.Self == nil {
+		return "", nil
+	}
+	if u, ok := rs.User[strconv.FormatInt(rs.Self.UserID, 10)]; ok {
+		return u.LoginName, nil
 	}
 	return "", nil
 }

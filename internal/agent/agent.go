@@ -45,6 +45,7 @@ type Server struct {
 	log        *eventlog.Log
 	leases     *leaseRegistry
 	localToken string // token required for loopback callers; "" disables the check
+	selfLogin  string // this node's tailnet login; same-login peers get CapExec
 }
 
 // New constructs an agent server.
@@ -55,6 +56,10 @@ func New(cfg config.Config, ts *tailnet.Client, log *eventlog.Log) *Server {
 // SetLocalToken sets the token a loopback caller must present to be trusted as
 // the local owner. The real daemon always sets this; tests may leave it empty.
 func (s *Server) SetLocalToken(tok string) { s.localToken = tok }
+
+// SetSelfLogin sets this node's tailnet login so other devices owned by the
+// same account are trusted for exec without per-node policy config.
+func (s *Server) SetSelfLogin(login string) { s.selfLogin = login }
 
 // Handler returns the agent's HTTP handler.
 func (s *Server) Handler() http.Handler {

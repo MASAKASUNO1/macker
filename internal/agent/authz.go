@@ -18,7 +18,7 @@ func peerFrom(ctx context.Context) (authz.Peer, bool) {
 // authResolve resolves the caller's identity and capability using the shared
 // authorization model.
 func (s *Server) authResolve(r *http.Request) authz.Peer {
-	return authz.Resolve(s.ts, s.cfg.Policy, s.localToken, r)
+	return authz.Resolve(s.ts, s.cfg.Policy, s.localToken, s.selfLogin, r)
 }
 
 // actorString identifies the peer for audit logs.

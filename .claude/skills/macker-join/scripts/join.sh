@@ -77,17 +77,33 @@ ok "macker: $MACKER ($("$MACKER" version 2>/dev/null || echo '?'))"
 if [ "$DO_LAUNCHAGENT" = 1 ]; then
   [ "$(uname -s)" = "Darwin" ] || die "--launchagent は macOS 専用です"
   PLIST="$HOME/Library/LaunchAgents/ai.masao.macker.plist"
-  ENVBLOCK=""
-  if [ -n "$COLLECTOR" ] || [ -n "$NODE" ]; then
-    ENVBLOCK="    <key>EnvironmentVariables</key>
-    <dict>"
-    [ -n "$COLLECTOR" ] && ENVBLOCK="$ENVBLOCK
+  # launchd gives a minimal PATH (/usr/bin:/bin:...), so the agent cannot find
+  # tmux (often /opt/homebrew/bin) and `macker ls` shows "(agent?)" with a 500
+  # on /v1/sessions. Build a PATH that includes where macker, tmux and the
+  # tailscale CLI actually live on this machine.
+  AGENT_PATH="/usr/bin:/bin:/usr/sbin:/sbin"
+  prepend_path() { case ":$AGENT_PATH:" in *":$1:"*) ;; *) [ -n "$1" ] && [ -d "$1" ] && AGENT_PATH="$1:$AGENT_PATH" ;; esac; }
+  prepend_path /usr/local/bin
+  prepend_path /opt/homebrew/bin
+  command -v brew >/dev/null 2>&1 && prepend_path "$(brew --prefix 2>/dev/null)/bin"
+  command -v tmux >/dev/null 2>&1 && prepend_path "$(dirname "$(command -v tmux)")"
+  [ -n "$TS" ] && prepend_path "$(dirname "$TS")"
+  prepend_path "$GOBIN"
+
+  # TERM must always be set: the Mac App Store Tailscale CLI prints
+  # "The Tailscale GUI failed to start" (not JSON) to stdout when TERM is
+  # unset, so the agent fails to read tailnet status and binds loopback only,
+  # invisible to other nodes. launchd does not pass TERM, so we set it here.
+  ENVBLOCK="    <key>EnvironmentVariables</key>
+    <dict>
+      <key>TERM</key><string>xterm-256color</string>
+      <key>PATH</key><string>$AGENT_PATH</string>"
+  [ -n "$COLLECTOR" ] && ENVBLOCK="$ENVBLOCK
       <key>MACKER_COLLECTOR</key><string>$COLLECTOR</string>"
-    [ -n "$NODE" ] && ENVBLOCK="$ENVBLOCK
+  [ -n "$NODE" ] && ENVBLOCK="$ENVBLOCK
       <key>MACKER_NODE</key><string>$NODE</string>"
-    ENVBLOCK="$ENVBLOCK
+  ENVBLOCK="$ENVBLOCK
     </dict>"
-  fi
   mkdir -p "$HOME/Library/LaunchAgents"
   cat > "$PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>

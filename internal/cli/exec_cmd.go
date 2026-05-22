@@ -231,6 +231,15 @@ func cmdAgent(parent context.Context, args []string) error {
 	srv := agent.New(cfg, ts, log)
 	srv.SetLocalToken(tok)
 
+	// Trust this account's other devices for exec (no per-node owner config
+	// needed for a single owner's machines).
+	if ts.Available() {
+		if login, err := ts.SelfLogin(parent); err == nil && login != "" {
+			srv.SetSelfLogin(login)
+			fmt.Fprintf(os.Stderr, "macker agent: trusting same-account devices (%s) for exec\n", login)
+		}
+	}
+
 	// The agent is a daemon: trap SIGINT and SIGTERM for graceful exit,
 	// layered on the parent context.
 	ctx, stop := signal.NotifyContext(parent, os.Interrupt, syscall.SIGTERM)
@@ -290,6 +299,11 @@ func cmdCollector(parent context.Context, args []string) error {
 	srv := collector.NewServer(store, ts, cfg.Policy)
 	srv.SetLocalToken(tok)
 	srv.SetAudit(auditLog, cfg.Node, cfg.Tenant)
+	if ts.Available() {
+		if login, err := ts.SelfLogin(parent); err == nil && login != "" {
+			srv.SetSelfLogin(login)
+		}
+	}
 
 	ctx, stop := signal.NotifyContext(parent, os.Interrupt, syscall.SIGTERM)
 	defer stop()

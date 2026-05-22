@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"os"
 	"os/exec"
 	"sort"
@@ -245,6 +246,55 @@ func (m Manager) New(ctx context.Context, name, command string) error {
 		return nil
 	}
 	return err
+}
+
+// nodePalette is a set of distinct, readable tmux 256-colour backgrounds (each
+// with a contrasting foreground) used to tint a session's status bar per node.
+var nodePalette = []struct{ bg, fg string }{
+	{"24", "255"},  // deep blue
+	{"28", "255"},  // green
+	{"88", "255"},  // dark red
+	{"130", "255"}, // orange
+	{"54", "255"},  // purple
+	{"23", "255"},  // teal
+	{"94", "255"},  // brown
+	{"240", "255"}, // gray
+	{"19", "255"},  // blue
+	{"64", "255"},  // olive
+	{"125", "255"}, // magenta
+	{"166", "255"}, // burnt orange
+}
+
+// NodeColor returns a stable status-bar background/foreground for a node name,
+// so every session on a node shares one colour and different nodes differ.
+func NodeColor(node string) (bg, fg string) {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(node))
+	p := nodePalette[h.Sum32()%uint32(len(nodePalette))]
+	return p.bg, p.fg
+}
+
+// ApplyNodeStyle tints a session's tmux status bar with the node's colour and
+// labels it with the node name, so an attached client can tell at a glance
+// which machine it is on. Best-effort and idempotent.
+func (m Manager) ApplyNodeStyle(ctx context.Context, name, node string) error {
+	if !validName(name) {
+		return fmt.Errorf("session: invalid name %q", name)
+	}
+	bg, fg := NodeColor(node)
+	style := fmt.Sprintf("bg=colour%s,fg=colour%s", bg, fg)
+	// NOTE: use the plain session name as the target, NOT "=name". tmux's
+	// set-option does not accept the "=" exact-match prefix (it reports
+	// "no such session: =name"), unlike attach/has/kill-session. Session names
+	// here are unique, so a plain target matches the right one.
+	// Tint the whole bar, label the node on the left, and widen the left cell so
+	// long node names are not truncated.
+	if _, err := m.run(ctx, "set-option", "-t", name, "status-style", style); err != nil {
+		return err
+	}
+	_, _ = m.run(ctx, "set-option", "-t", name, "status-left-length", "40")
+	_, _ = m.run(ctx, "set-option", "-t", name, "status-left", fmt.Sprintf(" %s ", node))
+	return nil
 }
 
 // Kill terminates a session by exact name.

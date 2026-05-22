@@ -170,6 +170,9 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// Tint the session's status bar with this node's colour so an attached
+	// client can tell which machine it is on. Best-effort.
+	_ = s.sess.ApplyNodeStyle(r.Context(), req.Name, s.cfg.Node)
 	p, _ := peerFrom(r.Context())
 	s.audit(eventlog.Event{
 		Type: eventlog.SessionOpen, Node: s.cfg.Node, Session: req.Name, Actor: actorString(p),

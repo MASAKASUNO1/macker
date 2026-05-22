@@ -82,7 +82,9 @@ if [ "$DO_LAUNCHAGENT" = 1 ]; then
   # on /v1/sessions. Build a PATH that includes where macker, tmux and the
   # tailscale CLI actually live on this machine.
   AGENT_PATH="/usr/bin:/bin:/usr/sbin:/sbin"
-  prepend_path() { case ":$AGENT_PATH:" in *":$1:"*) ;; *) [ -n "$1" ] && [ -d "$1" ] && AGENT_PATH="$1:$AGENT_PATH" ;; esac; }
+  # Always return 0 — under `set -e`, a missing directory would otherwise abort
+  # the script (common on Apple Silicon where /usr/local/bin doesn't exist).
+  prepend_path() { case ":$AGENT_PATH:" in *":$1:"*) ;; *) if [ -n "$1" ] && [ -d "$1" ]; then AGENT_PATH="$1:$AGENT_PATH"; fi ;; esac; return 0; }
   prepend_path /usr/local/bin
   prepend_path /opt/homebrew/bin
   command -v brew >/dev/null 2>&1 && prepend_path "$(brew --prefix 2>/dev/null)/bin"

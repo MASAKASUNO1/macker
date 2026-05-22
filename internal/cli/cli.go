@@ -22,7 +22,9 @@ var Version = "0.1.0-dev"
 const usage = `macker — manage AI-agent/dev sessions across your tailnet
 
 usage:
-  macker <node>[:<session>]         attach to (or create) a session on a node
+  macker <node>                     open a fresh session on a node (one per window;
+                                    closing it kills only that session)
+  macker <node>:<session>           attach to (or create) a named, reattachable session
   macker <node>[:<session>] clear   reset that session (kill; next attach is fresh)
   macker ls                         list nodes and their sessions
   macker exec <node> -- <cmd>...    run an authorized command on a node

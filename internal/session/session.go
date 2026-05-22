@@ -52,8 +52,23 @@ func (m Manager) bin() string {
 // we treat as "zero sessions" rather than an error.
 var noServerMarkers = []string{"no server running", "no current session", "error connecting to"}
 
+// shJoin single-quotes each part into one POSIX shell command string.
+func shJoin(parts []string) string {
+	q := make([]string, len(parts))
+	for i, p := range parts {
+		q[i] = "'" + strings.ReplaceAll(p, "'", `'\''`) + "'"
+	}
+	return strings.Join(q, " ")
+}
+
 func (m Manager) run(ctx context.Context, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, m.bin(), args...)
+	// Run tmux through a login shell (`/bin/sh -lc`) instead of exec'ing it
+	// directly. On macOS a tmux client spawned straight from the launchd-managed
+	// agent cannot see or connect to the tmux server, so list/has-session report
+	// no sessions even when they exist (and attach works) — which broke
+	// `macker ls` and session cleanup. The same command via a login shell
+	// connects fine (this is the path `macker exec` already used successfully).
+	cmd := exec.CommandContext(ctx, "/bin/sh", "-lc", shJoin(append([]string{m.bin()}, args...)))
 	var out, errb bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &errb
@@ -182,15 +197,15 @@ func (m Manager) Exists(ctx context.Context, name string) (bool, error) {
 	if !validName(name) {
 		return false, fmt.Errorf("session: invalid name %q", name)
 	}
-	err := exec.CommandContext(ctx, m.bin(), "has-session", "-t", "="+name).Run()
+	_, err := m.run(ctx, "has-session", "-t", "="+name)
 	if err == nil {
 		return true, nil
 	}
-	var ee *exec.ExitError
-	if errors.As(err, &ee) {
-		return false, nil // non-zero exit just means "not found"
+	if errors.Is(err, errNoServer) {
+		return false, nil
 	}
-	return false, err
+	// Any other non-zero exit (e.g. "can't find session") means "not found".
+	return false, nil
 }
 
 // New creates a detached session. If command is empty, the user's default

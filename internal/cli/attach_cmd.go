@@ -24,12 +24,23 @@ func newClientID() string {
 	return hex.EncodeToString(b[:])
 }
 
+// newAutoSession returns a fresh, unique session name. A bare `macker <node>`
+// (no explicit session) uses this so each invocation opens its own session and
+// each terminal window maps 1:1 to one session — closing it (ephemeral) kills
+// only that session, never another window's. To reattach to a shared/persistent
+// session instead, name it explicitly: `macker <node>:<name>`.
+func newAutoSession() string {
+	var b [4]byte
+	_, _ = rand.Read(b[:])
+	return "s-" + hex.EncodeToString(b[:])
+}
+
 // cmdAttach attaches to (creating if needed) a session on a target node.
 func cmdAttach(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("attach", flag.ContinueOnError)
 	keep := fs.Bool("keep", false, "keep the session alive on intentional close (do not kill)")
 	command := fs.String("command", "", "command to run if the session must be created")
-	defName := fs.String("session", "main", "session name to use when the target omits one")
+	defName := fs.String("session", "", "session name to attach/create; default is a fresh unique session per run")
 	fs.Usage = func() {
 		fmt.Fprintln(os.Stderr, "usage: macker attach [flags] <node>[:<session>]")
 		fs.PrintDefaults()
@@ -44,7 +55,13 @@ func cmdAttach(ctx context.Context, args []string) error {
 
 	t := parseTarget(fs.Arg(0))
 	if t.session == "" {
-		t.session = *defName
+		// No session in the target: use --session if given, otherwise a fresh
+		// unique one so each window is independent (1 window <-> 1 session).
+		if *defName != "" {
+			t.session = *defName
+		} else {
+			t.session = newAutoSession()
+		}
 	}
 
 	r, err := newResolver(ctx)

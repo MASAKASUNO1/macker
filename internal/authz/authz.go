@@ -122,9 +122,17 @@ func Resolve(ts *tailnet.Client, policy config.Policy, localToken, selfLogin str
 	if err != nil || id == nil {
 		return Peer{Cap: CapNone}
 	}
-	c := CapabilityFor(policy, id.Login)
-	if selfLogin != "" && id.Login == selfLogin {
-		c = CapExec // another device owned by the same tailnet account
+	return Peer{Login: id.Login, NodeName: id.NodeName, Cap: capabilityForPeer(policy, id.Login, selfLogin)}
+}
+
+// capabilityForPeer decides a remote peer's capability: a peer whose login
+// matches this node's own tailnet login (selfLogin) is another device owned by
+// the same account and gets CapExec; otherwise the policy decides. selfLogin is
+// only honored when non-empty, so a node that cannot determine its own login
+// never upgrades anyone.
+func capabilityForPeer(policy config.Policy, login, selfLogin string) Capability {
+	if selfLogin != "" && login == selfLogin {
+		return CapExec
 	}
-	return Peer{Login: id.Login, NodeName: id.NodeName, Cap: c}
+	return CapabilityFor(policy, login)
 }

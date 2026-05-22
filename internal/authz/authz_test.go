@@ -56,6 +56,28 @@ func TestIsLoopback(t *testing.T) {
 	}
 }
 
+func TestCapabilityForPeerSelfLogin(t *testing.T) {
+	p := config.Policy{Owners: []string{"owner@x"}, AttachAllow: []string{"viewer@x"}}
+
+	// Same login as this node's owner => CapExec, regardless of policy.
+	if got := capabilityForPeer(p, "me@x", "me@x"); got != CapExec {
+		t.Errorf("same-login: got %v, want CapExec", got)
+	}
+	// A different login falls back to policy (not listed => CapNone, because
+	// AttachAllow is non-empty and does not include it).
+	if got := capabilityForPeer(p, "stranger@x", "me@x"); got != CapNone {
+		t.Errorf("different login: got %v, want CapNone (policy)", got)
+	}
+	// Empty selfLogin must never upgrade — not even an empty peer login.
+	if got := capabilityForPeer(p, "", ""); got != CapNone {
+		t.Errorf("empty selfLogin + empty login: got %v, want CapNone (no upgrade)", got)
+	}
+	// A policy-listed owner still works via policy when selfLogin is empty.
+	if got := capabilityForPeer(p, "owner@x", ""); got != CapExec {
+		t.Errorf("policy owner with empty selfLogin: got %v, want CapExec", got)
+	}
+}
+
 func TestActor(t *testing.T) {
 	if (Peer{Login: "a@b"}).Actor() != "a@b" {
 		t.Error("Actor should prefer login")

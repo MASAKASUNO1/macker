@@ -90,6 +90,15 @@ if [ "$DO_LAUNCHAGENT" = 1 ]; then
   [ -n "$TS" ] && prepend_path "$(dirname "$TS")"
   prepend_path "$GOBIN"
 
+  # Escape values before embedding them in the plist XML so a string
+  # containing <, >, & (or a literal </string>) cannot break the document or
+  # inject extra launchd keys.
+  xml_escape() { printf '%s' "$1" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'; }
+  E_MACKER="$(xml_escape "$MACKER")"
+  E_PATH="$(xml_escape "$AGENT_PATH")"
+  E_COLLECTOR="$(xml_escape "$COLLECTOR")"
+  E_NODE="$(xml_escape "$NODE")"
+
   # TERM must always be set: the Mac App Store Tailscale CLI prints
   # "The Tailscale GUI failed to start" (not JSON) to stdout when TERM is
   # unset, so the agent fails to read tailnet status and binds loopback only,
@@ -97,11 +106,11 @@ if [ "$DO_LAUNCHAGENT" = 1 ]; then
   ENVBLOCK="    <key>EnvironmentVariables</key>
     <dict>
       <key>TERM</key><string>xterm-256color</string>
-      <key>PATH</key><string>$AGENT_PATH</string>"
+      <key>PATH</key><string>$E_PATH</string>"
   [ -n "$COLLECTOR" ] && ENVBLOCK="$ENVBLOCK
-      <key>MACKER_COLLECTOR</key><string>$COLLECTOR</string>"
+      <key>MACKER_COLLECTOR</key><string>$E_COLLECTOR</string>"
   [ -n "$NODE" ] && ENVBLOCK="$ENVBLOCK
-      <key>MACKER_NODE</key><string>$NODE</string>"
+      <key>MACKER_NODE</key><string>$E_NODE</string>"
   ENVBLOCK="$ENVBLOCK
     </dict>"
   mkdir -p "$HOME/Library/LaunchAgents"
@@ -112,7 +121,7 @@ if [ "$DO_LAUNCHAGENT" = 1 ]; then
     <key>Label</key><string>ai.masao.macker</string>
     <key>ProgramArguments</key>
     <array>
-      <string>$MACKER</string>
+      <string>$E_MACKER</string>
       <string>agent</string>
     </array>
     <key>RunAtLoad</key><true/>

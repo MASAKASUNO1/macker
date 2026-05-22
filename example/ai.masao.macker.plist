@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  macker agent as a LaunchAgent.
+
+  IMPORTANT: this MUST be a LaunchAgent (~/Library/LaunchAgents), not a
+  LaunchDaemon. It has to run inside your GUI login session so that child
+  processes (Claude Code, etc.) inherit Keychain access. A pre-login
+  LaunchDaemon would break Keychain-dependent tools.
+
+  Install:
+    cp example/ai.masao.macker.plist ~/Library/LaunchAgents/
+    # edit the macker path below to your installed binary
+    launchctl load ~/Library/LaunchAgents/ai.masao.macker.plist
+-->
+<plist version="1.0">
+  <dict>
+    <key>Label</key>
+    <string>ai.masao.macker</string>
+
+    <key>ProgramArguments</key>
+    <array>
+      <string>/usr/local/bin/macker</string>
+      <string>agent</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/macker-agent.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/macker-agent.log</string>
+
+    <key>ProcessType</key>
+    <string>Interactive</string>
+  </dict>
+</plist>

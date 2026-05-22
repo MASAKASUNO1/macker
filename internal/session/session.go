@@ -1,0 +1,242 @@
+// Package session wraps tmux to enumerate, create, and kill sessions on the
+// local host. The agent uses it to report what is running and to manage
+// lifecycle; the actual terminal stream is carried by ssh+tmux, not by this
+// package (see DESIGN.md §5).
+package session
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"os/exec"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// Kind classifies what a session appears to be running.
+type Kind string
+
+const (
+	KindClaude  Kind = "claude" // a Claude Code (or similar agent) session
+	KindShell   Kind = "shell"
+	KindUnknown Kind = "unknown"
+)
+
+// Session describes a single tmux session.
+type Session struct {
+	Name     string    `json:"name"`
+	Created  time.Time `json:"created"`
+	Attached int       `json:"attached"` // number of attached clients
+	Windows  int       `json:"windows"`
+	Kind     Kind      `json:"kind"`
+	Command  string    `json:"command"` // representative foreground command
+}
+
+// Manager runs tmux commands. The zero value uses "tmux" from PATH.
+type Manager struct {
+	Bin string // tmux binary, defaults to "tmux"
+}
+
+func (m Manager) bin() string {
+	if m.Bin != "" {
+		return m.Bin
+	}
+	return "tmux"
+}
+
+// noServerMarkers are substrings tmux prints when no server is running, which
+// we treat as "zero sessions" rather than an error.
+var noServerMarkers = []string{"no server running", "no current session", "error connecting to"}
+
+func (m Manager) run(ctx context.Context, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, m.bin(), args...)
+	var out, errb bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &errb
+	err := cmd.Run()
+	if err != nil {
+		msg := strings.ToLower(strings.TrimSpace(errb.String()))
+		for _, mk := range noServerMarkers {
+			if strings.Contains(msg, mk) {
+				return "", errNoServer
+			}
+		}
+		if msg != "" {
+			return "", fmt.Errorf("tmux %s: %v: %s", strings.Join(args, " "), err, strings.TrimSpace(errb.String()))
+		}
+		return "", fmt.Errorf("tmux %s: %w", strings.Join(args, " "), err)
+	}
+	return out.String(), nil
+}
+
+var errNoServer = errors.New("tmux: no server running")
+
+const listFmt = "#{session_name}\t#{session_created}\t#{session_attached}\t#{session_windows}"
+const paneFmt = "#{session_name}\t#{pane_current_command}\t#{pane_title}"
+
+// List returns all tmux sessions on the host, classified by kind. When no
+// tmux server is running it returns an empty slice and no error.
+func (m Manager) List(ctx context.Context) ([]Session, error) {
+	out, err := m.run(ctx, "list-sessions", "-F", listFmt)
+	if err != nil {
+		if errors.Is(err, errNoServer) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	panes, _ := m.panesBySession(ctx) // best-effort classification
+
+	var sessions []Session
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if line == "" {
+			continue
+		}
+		f := strings.Split(line, "\t")
+		if len(f) < 4 {
+			continue
+		}
+		s := Session{Name: f[0]}
+		if secs, err := strconv.ParseInt(f[1], 10, 64); err == nil {
+			s.Created = time.Unix(secs, 0)
+		}
+		s.Attached, _ = strconv.Atoi(f[2])
+		s.Windows, _ = strconv.Atoi(f[3])
+		s.Kind, s.Command = classify(panes[s.Name])
+		sessions = append(sessions, s)
+	}
+	sort.Slice(sessions, func(i, j int) bool { return sessions[i].Name < sessions[j].Name })
+	return sessions, nil
+}
+
+// paneInfo is a single pane's identifying strings.
+type paneInfo struct {
+	command string
+	title   string
+}
+
+func (m Manager) panesBySession(ctx context.Context) (map[string][]paneInfo, error) {
+	out, err := m.run(ctx, "list-panes", "-a", "-F", paneFmt)
+	if err != nil {
+		return nil, err
+	}
+	res := map[string][]paneInfo{}
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if line == "" {
+			continue
+		}
+		f := strings.SplitN(line, "\t", 3)
+		if len(f) < 2 {
+			continue
+		}
+		pi := paneInfo{command: f[1]}
+		if len(f) == 3 {
+			pi.title = f[2]
+		}
+		res[f[0]] = append(res[f[0]], pi)
+	}
+	return res, nil
+}
+
+// classify infers the session kind from its panes. A pane that looks like a
+// Claude Code agent wins; otherwise we report the most common foreground
+// command as a shell/unknown session.
+func classify(panes []paneInfo) (Kind, string) {
+	if len(panes) == 0 {
+		return KindUnknown, ""
+	}
+	counts := map[string]int{}
+	for _, p := range panes {
+		hay := strings.ToLower(p.command + " " + p.title)
+		if strings.Contains(hay, "claude") {
+			return KindClaude, "claude"
+		}
+		counts[p.command]++
+	}
+	best, bestN := "", 0
+	for cmd, n := range counts {
+		if n > bestN {
+			best, bestN = cmd, n
+		}
+	}
+	if isShell(best) {
+		return KindShell, best
+	}
+	return KindUnknown, best
+}
+
+func isShell(cmd string) bool {
+	switch cmd {
+	case "zsh", "bash", "sh", "fish", "-zsh", "-bash":
+		return true
+	}
+	return false
+}
+
+// Exists reports whether a session with the given name exists.
+func (m Manager) Exists(ctx context.Context, name string) (bool, error) {
+	if !validName(name) {
+		return false, fmt.Errorf("session: invalid name %q", name)
+	}
+	err := exec.CommandContext(ctx, m.bin(), "has-session", "-t", "="+name).Run()
+	if err == nil {
+		return true, nil
+	}
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		return false, nil // non-zero exit just means "not found"
+	}
+	return false, err
+}
+
+// New creates a detached session. If command is empty, the user's default
+// shell is started. The "=" prefix on the target forces an exact-name match.
+func (m Manager) New(ctx context.Context, name, command string) error {
+	if !validName(name) {
+		return fmt.Errorf("session: invalid name %q", name)
+	}
+	args := []string{"new-session", "-d", "-s", name}
+	if command != "" {
+		// "--" stops tmux option parsing so a command starting with "-" is not
+		// misread as a flag.
+		args = append(args, "--", command)
+	}
+	_, err := m.run(ctx, args...)
+	return err
+}
+
+// Kill terminates a session by exact name.
+func (m Manager) Kill(ctx context.Context, name string) error {
+	if !validName(name) {
+		return fmt.Errorf("session: invalid name %q", name)
+	}
+	_, err := m.run(ctx, "kill-session", "-t", "="+name)
+	if errors.Is(err, errNoServer) {
+		return nil // nothing to kill
+	}
+	return err
+}
+
+// validName guards against argument/option injection through session names.
+// tmux session names cannot contain ':' or '.', and we additionally forbid
+// leading dashes and whitespace so a name can never be read as a flag.
+func validName(name string) bool {
+	if name == "" || len(name) > 128 {
+		return false
+	}
+	if strings.HasPrefix(name, "-") {
+		return false
+	}
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '-' || r == '_':
+		default:
+			return false
+		}
+	}
+	return true
+}

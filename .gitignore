@@ -1,0 +1,15 @@
+# Built binary
+/macker
+
+# Go test/coverage artifacts
+*.test
+*.out
+coverage.*
+
+# Local runtime state (event logs, tokens, cursors) — never commit
+*.token
+*.jsonl
+shipper.cursor
+
+# macOS
+.DS_Store

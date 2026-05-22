@@ -1,0 +1,10 @@
+{
+  "node": "mac-mini",
+  "listen": ":4477",
+  "collector": "",
+  "policy": {
+    "owners": ["you@example.com"],
+    "exec_allow": [],
+    "attach_allow": []
+  }
+}

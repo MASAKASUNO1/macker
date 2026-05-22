@@ -79,13 +79,24 @@ go install github.com/masakasuno1/macker/cmd/macker@latest
 
 ```sh
 macker ls                       # 誰がオンラインで何が動いているか
-macker mac-mini                 # そのマシンのセッションに飛び込む(無ければ作成)
-macker mac-mini:dev             # 特定セッションを指定
-macker mac-mini clear           # そのセッションをリセット(次の attach は新規)
+macker mac-mini                 # そのマシンで新しいセッションを開く(ウィンドウ1つにつき1セッション)
+macker mac-mini:dev             # 名前付きの再 attach 可能なセッションに入る(無ければ作成)
+macker mac-mini ls              # そのマシンのセッションを詳細表示(clear/attach の判断用)
+macker mac-mini:dev clear       # そのセッションをリセット(次の attach は新規)
 macker exec macbook -- git pull # ノード上で認可付きコマンドを1つ実行
 ```
 
 `macker <マシン名>` がそのまま attach です(`attach` と打つ必要はありません)。
+素の `macker <node>` はウィンドウごとに独立した新規セッションを開き、その窓を
+閉じるとそのセッションだけが kill されます。続きをやり直したいセッションは
+`<node>:<session>` の名前付きにしておくと、detach・再 attach できます。
+
+**tab 補完(zsh)** を入れておくと、サブコマンド・ライブなノード名・`<node>:` の
+後のセッション名まで補完されます:
+
+```sh
+eval "$(macker completion zsh)"   # ~/.zshrc の `compinit` の後に追記
+```
 
 **最初に話していたユースケース — 1ウィンドウに複数マシンのグリッド:**
 
@@ -101,14 +112,19 @@ macker grid self mac-mini macbook mac-mini-2
 ## コマンド
 
 ```
-macker <node>[:<session>]         セッションに attach(無ければ作成)
+macker <node>                     ノードで新しいセッションを開く(ウィンドウ1つにつき1つ。
+                                  閉じるとそのセッションだけが kill される)
+macker <node>:<session>           名前付きの再 attach 可能なセッションに attach(無ければ作成)
 macker <node>[:<session>] clear   そのセッションをリセット(kill。次の attach は新規)
 macker ls                         ノードとそのセッション一覧(状態つき)
+macker <node> ls                  1ノードのセッションを詳細表示(clear/attach の判断用)
 macker exec <node> -- <cmd>...    ノードで認可付きコマンドを実行
 macker grid <target>...           各ターゲットに attach したグリッドを開く
 macker agent                      ノードデーモンを起動
 macker collector                  イベント収集デーモンを起動
 macker context [ls|use <name>]    アクティブなコンテキストの表示・切替
+macker completion zsh             zsh タブ補完スクリプトを出力
+macker version                    バージョンを表示
 ```
 
 明示形 `macker attach <node>` / `macker kill <node>:<session>` も使えます。
@@ -144,6 +160,11 @@ heartbeat する lease から導出します:
 tmux のレイアウトを選べます。実験的な `--mode windows`(macOS)は、ターゲットごとに
 ネイティブの端末ウィンドウ(Ghostty / iTerm / Terminal)を開きます(未対応の端末では
 tmux グリッドにフォールバック)。
+
+新しいセッションは作成時に、**ノード名から決まる色でステータスバーが色付け**され、
+左端にノード名のラベルが付きます(ベストエフォート)。同じマシンのセッションは同じ色に、
+別マシンは別の色になるので、グリッドや複数窓でいま自分がどのマシンにいるかを一目で
+判別できます。
 
 ## コレクター
 
@@ -220,8 +241,12 @@ exec と認可拒否はすべて追記専用イベントログに記録されま
 - agent デーモン(health / sessions / exec / lease / release / kill / events)。
   ループバックトークン + `tailscale whois` 認可、追記専用の監査ログつき;
 - `ls` / `attach` / `exec` / `kill` / `grid` / `collector` / `context`;
+- ウィンドウごとに独立した新規セッション(素の `macker <node>`)と、再 attach 可能な
+  名前付きセッション(`<node>:<session>`)、`<node> ls` での詳細一覧;
 - ctrl+c 連打 + 窓を閉じるライフサイクル、lease ベースの
   `attached`/`orphaned`/`detached` 状態;
+- ノード名から決まるステータスバーの色付け(どのマシンにいるか一目で判別);
+- zsh タブ補完(`macker completion zsh` / 動的なノード・セッション補完);
 - バッファリング shipper つきの collector ミラーリング(落ちてもイベント無損失);
 - マルチテナントコンテキスト(`--context`、コンテキストごとに状態分離)。
 
@@ -229,4 +254,4 @@ exec と認可拒否はすべて追記専用イベントログに記録されま
 持つプリンシパルは他テナントも照会できる)、`/v1/collect` はイベントの素性を検証せず
 shipper を信頼する。トランスポートは HTTP/JSON(gRPC 未対応)。
 
-テスト: `go test -race ./...`(51 テスト)+ エンドツーエンドのスモーク確認。
+テスト: `go test -race ./...`(58 テスト)+ エンドツーエンドのスモーク確認。

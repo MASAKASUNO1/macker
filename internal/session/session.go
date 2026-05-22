@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"sort"
 	"strconv"
@@ -204,6 +205,14 @@ func (m Manager) New(ctx context.Context, name, command string) error {
 		return fmt.Errorf("session: invalid name %q", name)
 	}
 	args := []string{"new-session", "-d", "-s", name}
+	// Start in the user's home directory. The agent runs as a macOS LaunchAgent
+	// whose working directory is "/", and a new tmux session would otherwise
+	// inherit it — opening every macker session in "/" (read-only, which prompts
+	// like Starship flag with a lock icon). Best-effort: skip -c if home is
+	// unknown.
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		args = append(args, "-c", home)
+	}
 	if command != "" {
 		// "--" stops tmux option parsing so a command starting with "-" is not
 		// misread as a flag.

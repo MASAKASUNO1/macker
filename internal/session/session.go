@@ -193,7 +193,12 @@ func (m Manager) Exists(ctx context.Context, name string) (bool, error) {
 }
 
 // New creates a detached session. If command is empty, the user's default
-// shell is started. The "=" prefix on the target forces an exact-name match.
+// shell is started. It is idempotent: if a session of this name already exists
+// it returns nil rather than erroring. This matters because list-sessions can
+// under-report on macOS (a tmux server started in a different launchd session
+// is not always visible to the agent), so the caller's "list, then create if
+// missing" check may wrongly decide to create; tolerating the duplicate keeps
+// attach working in that case instead of failing with a 400.
 func (m Manager) New(ctx context.Context, name, command string) error {
 	if !validName(name) {
 		return fmt.Errorf("session: invalid name %q", name)
@@ -205,6 +210,9 @@ func (m Manager) New(ctx context.Context, name, command string) error {
 		args = append(args, "--", command)
 	}
 	_, err := m.run(ctx, args...)
+	if err != nil && strings.Contains(strings.ToLower(err.Error()), "duplicate session") {
+		return nil
+	}
 	return err
 }
 

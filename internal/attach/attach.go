@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -85,12 +86,26 @@ func (o *Options) defaults() {
 func (o *Options) command(ctx context.Context) *exec.Cmd {
 	target := "=" + o.Session // exact-name match in tmux
 	if o.Local {
+		// Local attach execs tmux directly (no shell), so the "=" target is safe.
 		return exec.CommandContext(ctx, o.TmuxBin, "attach-session", "-t", target)
 	}
 	args := []string{"-tt"} // force remote PTY allocation
 	args = append(args, o.SSHArgs...)
-	args = append(args, o.Addr, "tmux", "attach-session", "-t", target)
+	// ssh joins the remaining args into one string that the remote login shell
+	// re-parses, so a bare "=name" target is mangled there — zsh treats a
+	// leading "=" as filename expansion and fails with "name not found". Single-
+	// quote the whole tmux invocation so the remote shell passes it through
+	// verbatim (exact-name match preserved). `exec` replaces the shell so
+	// signals and the PTY map straight onto tmux.
+	remote := "exec tmux attach-session -t " + shellQuote(target)
+	args = append(args, o.Addr, remote)
 	return exec.CommandContext(ctx, "ssh", args...)
+}
+
+// shellQuote wraps s in single quotes for a POSIX/zsh remote shell so it is
+// treated as a literal: no "=" expansion, globbing, or word splitting.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // closeReason explains why the attach loop ended.

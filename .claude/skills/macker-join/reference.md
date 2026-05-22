@@ -43,3 +43,44 @@ Keychain も tmux サーバも見えないため不可。
   できないのが原因。plist の `EnvironmentVariables` に tmux のあるディレクトリを
   含む `PATH` を入れる。join.sh は `--launchagent` 時に tmux / tailscale /
   macker の場所を拾って自動で付与する。
+
+## attach(`macker <node>`)が動かないとき
+
+attach は `ssh <node> tmux attach-session ...` でリモートの tmux につなぐ。
+agent の認可(:4477)とは別に、以下のノード側・クライアント側の条件が要る。
+
+- **`command not found: tmux`(ssh 経由)**: 非対話 ssh は `~/.zshrc` を読まない
+  ため、Apple Silicon の tmux(`/opt/homebrew/bin`)が PATH から外れる。
+  `~/.zshenv` に `export PATH="/opt/homebrew/bin:$PATH"` を追加(join.sh が自動で
+  行う)。
+- **`agent returned 400: ... duplicate session`**: agent の `list-sessions` が
+  launchd セッション配下で空を返す一方、`new-session` は既存セッションを検出する
+  ことがある(macOS の per-session tmux サーバ可視性)。macker 本体はセッション
+  作成を冪等化(`duplicate session` を成功扱い)してこれを吸収する。古いバイナリ
+  なら各ノードを最新に更新する。
+- **`zsh:1: <session> not found`**: リモート zsh が `=<session>`(exact-match の
+  `=` 接頭辞)をファイル名展開と誤解釈する。macker 本体は attach のリモート
+  コマンドをシングルクォートして渡し、これを防ぐ。古いバイナリなら更新する。
+- **`missing or unsuitable terminal: <TERM>`**: クライアントの `TERM`(例
+  Ghostty の `xterm-ghostty`)の terminfo がリモートに無い。クライアント側で
+  一度だけ:`infocmp -x $TERM | ssh <node> 'tic -x -'`。
+- **`<user>@<node>: Permission denied` / Password を聞かれる**: attach の ssh は
+  **ローカルのユーザ名**で接続する。リモートのアカウント名が違う場合、
+  クライアントの `~/.ssh/config` でホスト→ユーザ/鍵を対応づける:
+  ```
+  Host <node>.<tailnet>.ts.net
+      User <remote-account>
+      IdentityFile ~/.ssh/id_ed25519
+      IdentitiesOnly yes
+  ```
+- **`port 22: Connection refused`**: リモートで「リモートログイン(SSH)」が無効。
+  そのマシンの システム設定 → 一般 → 共有 → リモートログイン を ON。
+- **tmux socket の不一致**: agent と ssh が別 socket を使うとセッションが見えない。
+  両方で `TMUX_TMPDIR=/tmp` に固定する(join.sh が plist と `~/.zshenv` に設定)。
+
+## 既知の制限
+
+- `macker ls` の SESSIONS が、attach できているのに `none` のままになることがある。
+  agent(GUI launchd セッション)の `tmux list-sessions` が、別セッション由来の
+  tmux サーバを取りこぼすため。attach 自体は冪等な作成で動く。根本解決には
+  全 tmux 操作で固定 socket(`tmux -S <path>`)を使う改修が必要(follow-up 候補)。

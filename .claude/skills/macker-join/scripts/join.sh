@@ -105,9 +105,16 @@ if [ "$DO_LAUNCHAGENT" = 1 ]; then
   # "The Tailscale GUI failed to start" (not JSON) to stdout when TERM is
   # unset, so the agent fails to read tailnet status and binds loopback only,
   # invisible to other nodes. launchd does not pass TERM, so we set it here.
+  #
+  # TMUX_TMPDIR pins the tmux socket directory to /tmp. The agent (in the GUI
+  # launchd session) and the `ssh <node> tmux attach` an attaching client runs
+  # must use the SAME tmux server; without a fixed TMUX_TMPDIR they can diverge
+  # on macOS (per-session $TMPDIR), so the agent creates a session the ssh side
+  # cannot find. ~/.zshenv below pins the same value for non-interactive ssh.
   ENVBLOCK="    <key>EnvironmentVariables</key>
     <dict>
       <key>TERM</key><string>xterm-256color</string>
+      <key>TMUX_TMPDIR</key><string>/tmp</string>
       <key>PATH</key><string>$E_PATH</string>"
   [ -n "$COLLECTOR" ] && ENVBLOCK="$ENVBLOCK
       <key>MACKER_COLLECTOR</key><string>$E_COLLECTOR</string>"
@@ -145,6 +152,37 @@ else
     echo "    MACKER_COLLECTOR=$COLLECTOR ${NODE:+MACKER_NODE=$NODE }macker agent"
   else
     echo "    ${NODE:+MACKER_NODE=$NODE }macker agent"
+  fi
+fi
+
+# 4b. Attach prerequisites over ssh -----------------------------------------
+# `macker <node>` attaches by running `ssh <node> tmux attach-session ...`. A
+# non-interactive ssh shell does NOT source ~/.zshrc, so on Apple Silicon tmux
+# (/opt/homebrew/bin) is off PATH and the attach fails with
+# "command not found: tmux". It also needs the SAME tmux socket dir as the
+# agent (see TMUX_TMPDIR above). ~/.zshenv IS sourced for non-interactive zsh,
+# so pin both there. Idempotent: only appended once.
+if [ "$(uname -s)" = "Darwin" ] && command -v tmux >/dev/null 2>&1; then
+  TMUX_DIR="$(dirname "$(command -v tmux)")"
+  ZENV="$HOME/.zshenv"
+  if ! grep -q "macker: attach over ssh" "$ZENV" 2>/dev/null; then
+    {
+      echo ""
+      echo "# macker: attach over ssh needs tmux on PATH and a fixed socket dir"
+      echo "export PATH=\"$TMUX_DIR:\$PATH\""
+      echo "export TMUX_TMPDIR=/tmp"
+    } >> "$ZENV"
+    ok "~/.zshenv に tmux PATH と TMUX_TMPDIR=/tmp を追加(ssh attach 用)"
+  else
+    ok "~/.zshenv は設定済み(ssh attach 用)"
+  fi
+  # Remote Login (sshd) must be on for other nodes to attach here. We cannot
+  # enable it headlessly (it needs admin), so just report its state.
+  if launchctl print system/com.openssh.sshd >/dev/null 2>&1; then
+    ok "リモートログイン(SSH): 有効"
+  else
+    warn "リモートログイン(SSH)が無効のようです。他ノードから attach するには"
+    warn "  システム設定 → 一般 → 共有 → リモートログイン を ON にしてください。"
   fi
 fi
 

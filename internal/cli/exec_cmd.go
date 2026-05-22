@@ -150,16 +150,16 @@ func cmdKill(ctx context.Context, args []string) error {
 	return nil
 }
 
-// cmdClear resets a node's session: `macker <node>[:<session>] clear`. It kills
-// the session (default "main"); the next `macker <node>` recreates it fresh.
+// cmdClear resets sessions on a node: `macker <node>[:<session>] clear`.
+//   - With a session (`<node>:<name> clear`) it kills that one session.
+//   - Without one (`<node> clear`) it reaps the auto sessions — the unnamed
+//     `s-xxxxxxxx` sessions a bare `macker <node>` opens — and leaves named
+//     (deliberately persistent) sessions alone.
 func cmdClear(ctx context.Context, args []string) error {
 	if len(args) != 1 {
 		return errors.New("usage: macker <node>[:<session>] clear")
 	}
 	t := parseTarget(args[0])
-	if t.session == "" {
-		t.session = "main"
-	}
 
 	r, err := newResolver(ctx)
 	if err != nil {
@@ -170,17 +170,68 @@ func cmdClear(ctx context.Context, args []string) error {
 		return err
 	}
 
-	if res.local {
-		if err := (session.Manager{}).Kill(ctx, t.session); err != nil {
-			return err
+	kill := func(name string) error {
+		if res.local {
+			return (session.Manager{}).Kill(ctx, name)
 		}
-	} else {
-		if err := newClient(r.cfg).Kill(ctx, res.host, t.session); err != nil {
-			return err
-		}
+		return newClient(r.cfg).Kill(ctx, res.host, name)
 	}
-	fmt.Fprintf(os.Stderr, "macker: reset %s:%s (next 'macker %s' starts fresh)\n", res.name, t.session, t.node)
+
+	// Explicit session: kill just it.
+	if t.session != "" {
+		if err := kill(t.session); err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "macker: reset %s:%s\n", res.name, t.session)
+		return nil
+	}
+
+	// Bare node: reap auto sessions only.
+	names, err := listSessionNames(ctx, r, res)
+	if err != nil {
+		return fmt.Errorf("listing sessions on %s: %w", res.name, err)
+	}
+	var killed []string
+	for _, n := range names {
+		if !isAutoSession(n) {
+			continue
+		}
+		if err := kill(n); err != nil {
+			fmt.Fprintf(os.Stderr, "macker: clear %s:%s failed: %v\n", res.name, n, err)
+			continue
+		}
+		killed = append(killed, n)
+	}
+	if len(killed) == 0 {
+		fmt.Fprintf(os.Stderr, "macker: %s has no auto sessions to clear (named sessions are left alone; use '%s:<name> clear' for those)\n", res.name, t.node)
+		return nil
+	}
+	fmt.Fprintf(os.Stderr, "macker: cleared %d auto session(s) on %s: %s\n", len(killed), res.name, strings.Join(killed, ", "))
 	return nil
+}
+
+// listSessionNames returns the session names on a target, local or remote.
+func listSessionNames(ctx context.Context, r *resolver, res resolved) ([]string, error) {
+	if res.local {
+		ss, err := (session.Manager{}).List(ctx)
+		if err != nil {
+			return nil, err
+		}
+		names := make([]string, len(ss))
+		for i, s := range ss {
+			names[i] = s.Name
+		}
+		return names, nil
+	}
+	resp, err := newClient(r.cfg).ListSessions(ctx, res.host)
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, len(resp.Sessions))
+	for i, s := range resp.Sessions {
+		names[i] = s.Name
+	}
+	return names, nil
 }
 
 // cmdAgent runs the node daemon until interrupted.

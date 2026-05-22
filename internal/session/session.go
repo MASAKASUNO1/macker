@@ -90,8 +90,15 @@ func (m Manager) run(ctx context.Context, args ...string) (string, error) {
 
 var errNoServer = errors.New("tmux: no server running")
 
-const listFmt = "#{session_name}\t#{session_created}\t#{session_attached}\t#{session_windows}"
-const paneFmt = "#{session_name}\t#{pane_current_command}\t#{pane_title}"
+// fieldSep separates tmux -F fields. It must be a PRINTABLE character: tmux
+// sanitizes non-printable control bytes in -F output to "_", so a tab (0x09) or
+// US (0x1f) separator comes back as "_" and splitting drops every field. "|"
+// survives and never appears in a session name (alnum/-/_), the numeric
+// created/attached/windows fields, or a process name; pane titles may contain
+// it, so callers that parse a title split with a field limit and keep it last.
+const fieldSep = "|"
+const listFmt = "#{session_name}" + fieldSep + "#{session_created}" + fieldSep + "#{session_attached}" + fieldSep + "#{session_windows}"
+const paneFmt = "#{session_name}" + fieldSep + "#{pane_current_command}" + fieldSep + "#{pane_title}"
 
 // List returns all tmux sessions on the host, classified by kind. When no
 // tmux server is running it returns an empty slice and no error.
@@ -111,7 +118,7 @@ func (m Manager) List(ctx context.Context) ([]Session, error) {
 		if line == "" {
 			continue
 		}
-		f := strings.Split(line, "\t")
+		f := strings.Split(line, fieldSep)
 		if len(f) < 4 {
 			continue
 		}
@@ -144,7 +151,7 @@ func (m Manager) panesBySession(ctx context.Context) (map[string][]paneInfo, err
 		if line == "" {
 			continue
 		}
-		f := strings.SplitN(line, "\t", 3)
+		f := strings.SplitN(line, fieldSep, 3)
 		if len(f) < 2 {
 			continue
 		}

@@ -27,6 +27,7 @@ usage:
   macker <node>:<session>           attach to (or create) a named, reattachable session
   macker <node>[:<session>] clear   reset that session (kill; next attach is fresh)
   macker ls                         list nodes and their sessions
+  macker <node> ls                  list one node's sessions in detail (for clear/attach decisions)
   macker exec <node> -- <cmd>...    run an authorized command on a node
   macker grid <target>...           open a grid attached to each target
   macker agent                      run the node daemon
@@ -87,9 +88,12 @@ func Main(args []string) int {
 		return 0
 	default:
 		// Not a subcommand: treat the first token as a node target, so
-		// `macker mac-mini` attaches and `macker mac-mini clear` resets it.
+		// `macker mac-mini` attaches, `macker mac-mini clear` resets it, and
+		// `macker mac-mini ls` lists just that node's sessions in detail.
 		if len(rest) >= 1 && rest[0] == "clear" {
 			err = cmdClear(ctx, append([]string{cmd}, rest[1:]...))
+		} else if len(rest) == 1 && rest[0] == "ls" {
+			err = cmdNodeLs(ctx, cmd)
 		} else {
 			// Reorder so attach's flag parser sees flags first, then the
 			// target last: `macker mac-mini --keep` -> attach [--keep mac-mini].
@@ -295,5 +299,89 @@ func stateMark(st api.SessionState) string {
 		return "orphaned"
 	default:
 		return "detached"
+	}
+}
+
+// cmdNodeLs lists a single node's sessions in detail: `macker <node> ls`. It is
+// the per-node companion to `macker ls`, meant to inform attach/clear decisions
+// (which sessions are orphaned, how old they are, what is running in them).
+func cmdNodeLs(ctx context.Context, nodeArg string) error {
+	t := parseTarget(nodeArg)
+
+	r, err := newResolver(ctx)
+	if err != nil {
+		return err
+	}
+	res, err := r.resolve(t)
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, 4*time.Second)
+	defer cancel()
+
+	resp, err := newClient(r.cfg).ListSessions(ctx, res.host)
+	if err != nil {
+		return fmt.Errorf("could not reach %s — is its agent running? (%w)", res.name, err)
+	}
+	if len(resp.Sessions) == 0 {
+		fmt.Printf("%s: no sessions\n", res.name)
+		return nil
+	}
+
+	// Surface cleanup candidates first: orphaned, then detached, then attached;
+	// ties broken by name. This puts the most "clearable" sessions at the top.
+	rank := func(st api.SessionState) int {
+		switch st {
+		case api.StateOrphaned:
+			return 0
+		case api.StateDetached:
+			return 1
+		default: // attached
+			return 2
+		}
+	}
+	sort.Slice(resp.Sessions, func(i, j int) bool {
+		if ri, rj := rank(resp.Sessions[i].State), rank(resp.Sessions[j].State); ri != rj {
+			return ri < rj
+		}
+		return resp.Sessions[i].Name < resp.Sessions[j].Name
+	})
+
+	tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+	fmt.Fprintln(tw, "SESSION\tKIND\tSTATE\tATTACHED\tWINDOWS\tAGE\tCOMMAND")
+	orphans := 0
+	for _, s := range resp.Sessions {
+		if s.State == api.StateOrphaned {
+			orphans++
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%d\t%s\t%s\n",
+			s.Name, s.Kind, stateMark(s.State), s.Attached, s.Windows,
+			shortDur(time.Since(s.Created)), s.Command)
+	}
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+	if orphans > 0 {
+		fmt.Fprintf(os.Stderr, "\n%d orphaned; clean up with: macker %s:<session> clear\n", orphans, t.node)
+	}
+	return nil
+}
+
+// shortDur renders a duration compactly for the age column (e.g. "12s", "5m",
+// "3h", "2d"), picking the largest single unit. Negative/zero clamps to "0s".
+func shortDur(d time.Duration) string {
+	if d < time.Second {
+		return "0s"
+	}
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd", int(d.Hours()/24))
 	}
 }

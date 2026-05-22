@@ -122,3 +122,18 @@ func TestShellJoin(t *testing.T) {
 		t.Errorf("shellJoin =\n  %s\nwant\n  %s", got, want)
 	}
 }
+
+func TestIsAutoSession(t *testing.T) {
+	auto := []string{"s-00000000", "s-deadbeef", "s-ff5521da"}
+	for _, n := range auto {
+		if !isAutoSession(n) {
+			t.Errorf("isAutoSession(%q) = false, want true", n)
+		}
+	}
+	named := []string{"main", "work", "s-", "s-123", "s-1234567890", "S-deadbeef", "s-deadbeeg", "session"}
+	for _, n := range named {
+		if isAutoSession(n) {
+			t.Errorf("isAutoSession(%q) = true, want false", n)
+		}
+	}
+}

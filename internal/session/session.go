@@ -287,13 +287,27 @@ func (m Manager) ApplyNodeStyle(ctx context.Context, name, node string) error {
 	// set-option does not accept the "=" exact-match prefix (it reports
 	// "no such session: =name"), unlike attach/has/kill-session. Session names
 	// here are unique, so a plain target matches the right one.
-	// Tint the whole bar, label the node on the left, and widen the left cell so
-	// long node names are not truncated.
+
+	// 1) Bottom status bar tinted, with the node labelled on the left.
 	if _, err := m.run(ctx, "set-option", "-t", name, "status-style", style); err != nil {
 		return err
 	}
 	_, _ = m.run(ctx, "set-option", "-t", name, "status-left-length", "40")
 	_, _ = m.run(ctx, "set-option", "-t", name, "status-left", fmt.Sprintf(" %s ", node))
+
+	// 2) A colored node label right above the pane (much easier to spot than the
+	// bottom bar). pane-border-status puts a thin line at the top of each pane;
+	// the format is a tmux format string and can carry inline style escapes.
+	borderFmt := fmt.Sprintf(" #[bg=colour%s,fg=colour%s,bold] %s #[default] ", bg, fg, node)
+	_, _ = m.run(ctx, "set-option", "-t", name, "pane-border-status", "top")
+	_, _ = m.run(ctx, "set-option", "-t", name, "pane-border-format", borderFmt)
+
+	// 3) Push the node name into the host terminal's tab/window title so an
+	// outer terminal (Ghostty, iTerm, etc.) shows which machine each tab is on.
+	_, _ = m.run(ctx, "set-option", "-t", name, "set-titles", "on")
+	// Use only ASCII in the title string: tmux sanitizes non-printable / high
+	// bytes in option output to "_" (we hit this earlier with -F separators).
+	_, _ = m.run(ctx, "set-option", "-t", name, "set-titles-string", fmt.Sprintf("%s | #S", node))
 	return nil
 }
 

@@ -206,6 +206,19 @@ type resolved struct {
 	node  *tailnet.Node
 }
 
+// resolved builds a resolved from a matched tailnet node, picking the local
+// path when it is this machine. Shared by exact and prefix match.
+func (r *resolver) resolved(n *tailnet.Node) (resolved, error) {
+	if n.Self {
+		return resolved{name: n.Name, host: "127.0.0.1", local: true, node: n}, nil
+	}
+	addr := n.Addr()
+	if addr == "" {
+		return resolved{}, fmt.Errorf("node %q has no reachable address", n.Name)
+	}
+	return resolved{name: n.Name, host: addr, local: false, node: n}, nil
+}
+
 func (r *resolver) resolve(t target) (resolved, error) {
 	if t.isLocal() {
 		return resolved{name: r.cfg.Node, host: "127.0.0.1", local: true}, nil
@@ -213,17 +226,34 @@ func (r *resolver) resolve(t target) (resolved, error) {
 	if strings.EqualFold(t.node, r.cfg.Node) {
 		return resolved{name: r.cfg.Node, host: "127.0.0.1", local: true}, nil
 	}
+	// Exact (case-insensitive) match.
 	for i := range r.nodes {
 		n := &r.nodes[i]
 		if strings.EqualFold(n.Name, t.node) {
-			if n.Self {
-				return resolved{name: n.Name, host: "127.0.0.1", local: true, node: n}, nil
+			return r.resolved(n)
+		}
+	}
+	// Unique prefix match: lets a short alias like "kyohei" resolve to
+	// "kyoheimac-mini" when no other node has the same prefix. Ambiguous
+	// prefixes (e.g. "mac" when several start with "mac") are reported with
+	// the candidates rather than silently picking one.
+	if t.node != "" {
+		lower := strings.ToLower(t.node)
+		var matches []*tailnet.Node
+		for i := range r.nodes {
+			if strings.HasPrefix(strings.ToLower(r.nodes[i].Name), lower) {
+				matches = append(matches, &r.nodes[i])
 			}
-			addr := n.Addr()
-			if addr == "" {
-				return resolved{}, fmt.Errorf("node %q has no reachable address", t.node)
+		}
+		if len(matches) == 1 {
+			return r.resolved(matches[0])
+		}
+		if len(matches) > 1 {
+			names := make([]string, len(matches))
+			for i, m := range matches {
+				names[i] = m.Name
 			}
-			return resolved{name: n.Name, host: addr, local: false, node: n}, nil
+			return resolved{}, fmt.Errorf("node %q is ambiguous (matches: %s)", t.node, strings.Join(names, ", "))
 		}
 	}
 	if !r.ts.Available() {

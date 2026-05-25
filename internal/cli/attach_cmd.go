@@ -103,11 +103,12 @@ func cmdAttach(ctx context.Context, args []string) error {
 		leaseSession(r, res, t.session, clientID, int(leaseTTL.Seconds()), ephemeral)
 	}
 
-	// On close: an intentional close of an ephemeral session kills it; anything
-	// else (—keep, or a natural detach/disconnect) releases the lease so the
-	// session lives on (and, if the holder vanished without this, goes orphaned).
-	onClose := func(intentional bool) {
-		if intentional && ephemeral {
+	// On close: an IntentClose on an ephemeral session kills it. Anything else
+	// — IntentDetach (ctrl+j mash), IntentNatural (clean detach / disconnect),
+	// or IntentClose on a --keep session — releases the lease so the session
+	// lives on (and, if the holder vanished without this, goes orphaned).
+	onClose := func(intent attach.Intent) {
+		if intent == attach.IntentClose && ephemeral {
 			releaseSession(r, res, t.session)
 			return
 		}
@@ -127,9 +128,9 @@ func cmdAttach(ctx context.Context, args []string) error {
 
 func lifecycleLabel(keep bool) string {
 	if keep {
-		return "keep; ctrl+c×3 or close detaches"
+		return "keep; ctrl+c×3, close, or ctrl+j×3 all detach"
 	}
-	return "ephemeral; ctrl+c×3 or close kills"
+	return "ephemeral; ctrl+c×3 or close kills, ctrl+j×3 detaches (session survives)"
 }
 
 // ensureSession makes sure the named session exists on the target.

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -85,6 +86,20 @@ func cmdAttach(ctx context.Context, args []string) error {
 	res, err := r.resolve(t)
 	if err != nil {
 		return err
+	}
+
+	// A purely numeric session reference is an index into `macker <node> ls`,
+	// resolved against the live list so the user can copy the position they
+	// just saw. Sessions literally named "0"/"1"/... are therefore unreachable
+	// by index — the colon form `<node>:<digits>` is shadowed too, since the
+	// disambiguation lives here rather than in the parser.
+	if isIndexLiteral(t.session) {
+		idx, _ := strconv.Atoi(t.session)
+		name, err := resolveSessionIndex(ctx, r, res, idx)
+		if err != nil {
+			return err
+		}
+		t.session = name
 	}
 
 	// Ensure the session exists (create if missing).
@@ -309,4 +324,39 @@ func setPaneTitle(ctx context.Context, tmuxBin, sock, paneID, title string) {
 		return
 	}
 	_ = exec.CommandContext(ctx, tmuxBin, "-L", sock, "select-pane", "-t", paneID, "-T", title).Run()
+}
+
+// isIndexLiteral reports whether s is a non-empty run of ASCII digits — the
+// shape that `macker <node> <N>` reserves for "index into the session list".
+func isIndexLiteral(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// resolveSessionIndex maps a 0-based index into the same ordered list that
+// `macker <node> ls` displays (see sortSessionViewsForDisplay). Lookup goes
+// through the agent so it sees real lifecycle state — if the agent is not
+// reachable, indexing is not available and we say so explicitly.
+func resolveSessionIndex(ctx context.Context, r *resolver, res resolved, idx int) (string, error) {
+	cctx, cancel := context.WithTimeout(ctx, 4*time.Second)
+	defer cancel()
+	resp, err := newClient(r.cfg).ListSessions(cctx, res.host)
+	if err != nil {
+		return "", fmt.Errorf("could not list sessions on %s to resolve index — is its agent running? (%w)", res.name, err)
+	}
+	if len(resp.Sessions) == 0 {
+		return "", fmt.Errorf("%s has no sessions to index", res.name)
+	}
+	sortSessionViewsForDisplay(resp.Sessions)
+	if idx < 0 || idx >= len(resp.Sessions) {
+		return "", fmt.Errorf("session index %d out of range on %s (have 0..%d)", idx, res.name, len(resp.Sessions)-1)
+	}
+	return resp.Sessions[idx].Name, nil
 }

@@ -81,6 +81,8 @@ go install github.com/masakasuno1/macker/cmd/macker@latest
 macker ls                       # 誰がオンラインで何が動いているか
 macker mac-mini                 # そのマシンで新しいセッションを開く(ウィンドウ1つにつき1セッション)
 macker mac-mini:dev             # 名前付きの再 attach 可能なセッションに入る(無ければ作成)
+macker mac-mini dev             # 同じ。コロンの代わりにスペースで指定する形式
+macker mac-mini 0               # `macker mac-mini ls` で 0 番目に出ているセッションへ attach
 macker mac-mini ls              # そのマシンのセッションを詳細表示(clear/attach の判断用)
 macker mac-mini:dev clear       # そのセッションをリセット(次の attach は新規)
 macker exec macbook -- git pull # ノード上で認可付きコマンドを1つ実行
@@ -115,6 +117,10 @@ macker grid self mac-mini macbook mac-mini-2
 macker <node>                     ノードで新しいセッションを開く(ウィンドウ1つにつき1つ。
                                   閉じるとそのセッションだけが kill される)
 macker <node>:<session>           名前付きの再 attach 可能なセッションに attach(無ければ作成)
+macker <node> <session>           同じ。コロンの代わりにスペースで区切る形式
+macker <node> <index>             `macker <node> ls` の並び順(orphaned → detached → attached、
+                                  同状態は名前順)で N 番目のセッションに attach。
+                                  数字だけの名前("0" / "1" など)はこの形では指せない
 macker <node>[:<session>] clear   そのセッションをリセット(kill。次の attach は新規)
 macker ls                         ノードとそのセッション一覧(状態つき)
 macker <node> ls                  1ノードのセッションを詳細表示(clear/attach の判断用)

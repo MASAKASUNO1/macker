@@ -25,6 +25,9 @@ usage:
   macker <node>                     open a fresh session on a node (one per window;
                                     closing it kills only that session)
   macker <node>:<session>           attach to (or create) a named, reattachable session
+  macker <node> <session>           same as above, but spelled with a space
+  macker <node> <index>             attach to the session at that index in
+                                    "macker <node> ls" (orphaned, then detached, then attached)
   macker <node>[:<session>] clear   reset that session (kill; next attach is fresh)
   macker ls                         list nodes and their sessions
   macker <node> ls                  list one node's sessions in detail (for clear/attach decisions)
@@ -44,6 +47,9 @@ global flags:
 target syntax:
   <node>            a tailnet node name; "self"/"local" or empty means this machine
   <node>:<session>  a specific tmux session on that node
+  <node> <session>  same, with a space — convenient with shell completion
+  <node> <index>    index (0-based) into "macker <node> ls" — sessions named purely
+                    as digits ("0", "1", ...) are therefore unreachable by index
 
 run "macker <command> -h" for command-specific flags.
 `
@@ -93,16 +99,16 @@ func Main(args []string) int {
 		return 0
 	default:
 		// Not a subcommand: treat the first token as a node target, so
-		// `macker mac-mini` attaches, `macker mac-mini clear` resets it, and
-		// `macker mac-mini ls` lists just that node's sessions in detail.
+		// `macker mac-mini` attaches, `macker mac-mini clear` resets it,
+		// `macker mac-mini ls` lists, and `macker mac-mini dev` /
+		// `macker mac-mini 0` attach the named/indexed session.
 		if len(rest) >= 1 && rest[0] == "clear" {
 			err = cmdClear(ctx, append([]string{cmd}, rest[1:]...))
 		} else if len(rest) == 1 && rest[0] == "ls" {
 			err = cmdNodeLs(ctx, cmd)
 		} else {
-			// Reorder so attach's flag parser sees flags first, then the
-			// target last: `macker mac-mini --keep` -> attach [--keep mac-mini].
-			err = cmdAttach(ctx, append(rest, cmd))
+			target, flags := rewriteBareAttachArgs(cmd, rest)
+			err = cmdAttach(ctx, append(flags, target))
 		}
 	}
 
@@ -150,6 +156,27 @@ func applyGlobalFlags(args []string) ([]string, error) {
 		}
 	}
 	return out, nil
+}
+
+// rewriteBareAttachArgs folds the bare `macker <node> ...` form into a single
+// target the attach flag parser can consume. It merges at most one non-flag
+// token from rest into cmd as ":<sess-or-index>" (skipped if cmd already has a
+// ":"), and passes flags through untouched so attach still sees `--keep` and
+// friends. Anything that isn't a flag or the single mergable token is left in
+// flags so attach's parser will surface the usage error.
+func rewriteBareAttachArgs(cmd string, rest []string) (string, []string) {
+	target := cmd
+	var flags []string
+	merged := false
+	for _, a := range rest {
+		if !merged && a != "" && !strings.HasPrefix(a, "-") && !strings.Contains(target, ":") {
+			target = target + ":" + a
+			merged = true
+			continue
+		}
+		flags = append(flags, a)
+	}
+	return target, flags
 }
 
 // target is a parsed "<node>:<session>" reference.
@@ -325,6 +352,28 @@ func sessionsSummary(ctx context.Context, r *resolver, n tailnet.Node, host stri
 	return strings.Join(parts, " ")
 }
 
+// sortSessionViewsForDisplay sorts in the same order as `macker <node> ls`
+// renders — orphaned first, then detached, then attached; ties broken by
+// name — so a numeric index from the list maps directly to a session.
+func sortSessionViewsForDisplay(s []api.SessionView) {
+	rank := func(st api.SessionState) int {
+		switch st {
+		case api.StateOrphaned:
+			return 0
+		case api.StateDetached:
+			return 1
+		default: // attached
+			return 2
+		}
+	}
+	sort.Slice(s, func(i, j int) bool {
+		if ri, rj := rank(s[i].State), rank(s[j].State); ri != rj {
+			return ri < rj
+		}
+		return s[i].Name < s[j].Name
+	})
+}
+
 // stateMark renders a session state compactly for the ls table.
 func stateMark(st api.SessionState) string {
 	switch st {
@@ -366,22 +415,7 @@ func cmdNodeLs(ctx context.Context, nodeArg string) error {
 
 	// Surface cleanup candidates first: orphaned, then detached, then attached;
 	// ties broken by name. This puts the most "clearable" sessions at the top.
-	rank := func(st api.SessionState) int {
-		switch st {
-		case api.StateOrphaned:
-			return 0
-		case api.StateDetached:
-			return 1
-		default: // attached
-			return 2
-		}
-	}
-	sort.Slice(resp.Sessions, func(i, j int) bool {
-		if ri, rj := rank(resp.Sessions[i].State), rank(resp.Sessions[j].State); ri != rj {
-			return ri < rj
-		}
-		return resp.Sessions[i].Name < resp.Sessions[j].Name
-	})
+	sortSessionViewsForDisplay(resp.Sessions)
 
 	tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
 	fmt.Fprintln(tw, "SESSION\tKIND\tSTATE\tATTACHED\tWINDOWS\tAGE\tCOMMAND")

@@ -102,10 +102,20 @@ func Main(args []string) int {
 		// `macker mac-mini` attaches, `macker mac-mini clear` resets it,
 		// `macker mac-mini ls` lists, and `macker mac-mini dev` /
 		// `macker mac-mini 0` attach the named/indexed session.
+		//
+		// `clear`/`ls` after the node are reserved: if a stray flag like
+		// `macker <node> ls --keep` fell through to the rewriter, "ls" would
+		// silently be merged in as a session name and an attach would create
+		// a session literally called "ls". So we route on rest[0] and let
+		// the subcommand reject extras with a usable message.
 		if len(rest) >= 1 && rest[0] == "clear" {
 			err = cmdClear(ctx, append([]string{cmd}, rest[1:]...))
-		} else if len(rest) == 1 && rest[0] == "ls" {
-			err = cmdNodeLs(ctx, cmd)
+		} else if len(rest) >= 1 && rest[0] == "ls" {
+			if len(rest) > 1 {
+				err = fmt.Errorf("ls takes no extra args; usage: macker %s ls", cmd)
+			} else {
+				err = cmdNodeLs(ctx, cmd)
+			}
 		} else {
 			target, flags := rewriteBareAttachArgs(cmd, rest)
 			err = cmdAttach(ctx, append(flags, target))

@@ -287,6 +287,34 @@ func TestMashTracker(t *testing.T) {
 	}
 }
 
+// Run's caller pre-creates the remote session via ensureSession; an early
+// error (here: a non-TTY stdin) must still fire OnClose so the caller can
+// clean up the session it just created — otherwise an ephemeral session
+// orphans on the agent for every failed attach.
+func TestRunFiresOnCloseOnEarlyError(t *testing.T) {
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	defer pr.Close()
+	defer pw.Close()
+
+	var got Intent = -1
+	o := Options{
+		In:      pr, // pipes are not TTYs → triggers the early-return path
+		Out:     pw,
+		Session: "test",
+		Local:   true,
+		OnClose: func(intent Intent) { got = intent },
+	}
+	if err := Run(context.Background(), o); err == nil {
+		t.Fatal("expected early-error from non-TTY stdin")
+	}
+	if got != IntentClose {
+		t.Fatalf("OnClose intent on early error = %v, want IntentClose", got)
+	}
+}
+
 // Local attach execs tmux directly (no shell), so the bare "=name" target is
 // correct there and must be preserved for exact-name matching.
 func TestLocalCommandUsesBareTarget(t *testing.T) {

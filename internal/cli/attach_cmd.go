@@ -69,6 +69,11 @@ func cmdAttach(ctx context.Context, args []string) error {
 	}
 
 	t := parseTarget(fs.Arg(0))
+	// Only a session that came from the positional target is eligible for
+	// numeric-index resolution. An explicit `--session 0` is the user asking
+	// for that literal name and must not be silently rewritten into the
+	// session at index 0.
+	indexable := isIndexLiteral(t.session)
 	if t.session == "" {
 		// No session in the target: use --session if given, otherwise a fresh
 		// unique one so each window is independent (1 window <-> 1 session).
@@ -88,22 +93,27 @@ func cmdAttach(ctx context.Context, args []string) error {
 		return err
 	}
 
-	// A purely numeric session reference is an index into `macker <node> ls`,
-	// resolved against the live list so the user can copy the position they
-	// just saw. Sessions literally named "0"/"1"/... are therefore unreachable
-	// by index — the colon form `<node>:<digits>` is shadowed too, since the
-	// disambiguation lives here rather than in the parser.
-	if isIndexLiteral(t.session) {
-		idx, _ := strconv.Atoi(t.session)
+	// A purely numeric positional session reference is an index into
+	// `macker <node> ls`, resolved against the live list so the user can copy
+	// the position they just saw. Sessions whose names satisfy isIndexLiteral
+	// are therefore unreachable by the colon/space form — use --session for
+	// those.
+	resolvedFromIndex := false
+	if indexable {
+		idx, _ := strconv.Atoi(t.session) // safe: isIndexLiteral caps length
 		name, err := resolveSessionIndex(ctx, r, res, idx)
 		if err != nil {
 			return err
 		}
 		t.session = name
+		resolvedFromIndex = true
 	}
 
-	// Ensure the session exists (create if missing).
-	if err := ensureSession(ctx, r, res, t.session, *command); err != nil {
+	// Ensure the session exists. When the name came from an index, the user
+	// pointed at a row of a list that they just saw — recreating it under the
+	// same name (because the holder cleared it in the meantime) would land
+	// them in a blank shell silently, so require existence instead.
+	if err := ensureSession(ctx, r, res, t.session, *command, resolvedFromIndex); err != nil {
 		return err
 	}
 
@@ -148,8 +158,11 @@ func lifecycleLabel(keep bool) string {
 	return "ephemeral; ctrl+c×3 or close kills, ctrl+j×3 detaches (session survives)"
 }
 
-// ensureSession makes sure the named session exists on the target.
-func ensureSession(ctx context.Context, r *resolver, res resolved, name, command string) error {
+// ensureSession makes sure the named session exists on the target. When
+// mustExist is true the session is NOT created if it's gone — this is for the
+// index path, where the user picked from a live list and a silent recreate
+// would drop them in an empty shell.
+func ensureSession(ctx context.Context, r *resolver, res resolved, name, command string, mustExist bool) error {
 	if res.local {
 		mgr := session.Manager{}
 		// Prefer the local agent for audit; fall back to direct tmux if it is
@@ -160,6 +173,9 @@ func ensureSession(ctx context.Context, r *resolver, res resolved, name, command
 		}
 		if exists {
 			return nil
+		}
+		if mustExist {
+			return fmt.Errorf("session %q is no longer on %s (it was cleared between list and attach)", name, res.name)
 		}
 		return mgr.New(ctx, name, command)
 	}
@@ -173,6 +189,9 @@ func ensureSession(ctx context.Context, r *resolver, res resolved, name, command
 		if s.Name == name {
 			return nil
 		}
+	}
+	if mustExist {
+		return fmt.Errorf("session %q is no longer on %s (it was cleared between list and attach)", name, res.name)
 	}
 	_, err = c.CreateSession(ctx, res.host, api.CreateSessionRequest{
 		Name: name, Command: command, Ephemeral: true,
@@ -326,10 +345,17 @@ func setPaneTitle(ctx context.Context, tmuxBin, sock, paneID, title string) {
 	_ = exec.CommandContext(ctx, tmuxBin, "-L", sock, "select-pane", "-t", paneID, "-T", title).Run()
 }
 
-// isIndexLiteral reports whether s is a non-empty run of ASCII digits — the
-// shape that `macker <node> <N>` reserves for "index into the session list".
+// isIndexLiteral reports whether s is the canonical decimal representation of
+// a non-negative int and small enough to use as an index — the shape that
+// `macker <node> <N>` reserves for "index into the session list". Leading
+// zeros ("007") and overly long inputs ("99999999999999999999") are NOT
+// indices: they would either alias real session names that happen to be all
+// digits, or overflow strconv.Atoi silently and resolve to a wrong session.
 func isIndexLiteral(s string) bool {
-	if s == "" {
+	if s == "" || len(s) > 6 { // 6 digits = 999,999 sessions; plenty
+		return false
+	}
+	if len(s) > 1 && s[0] == '0' { // "007", "01", … are names, not indices
 		return false
 	}
 	for _, c := range s {

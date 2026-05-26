@@ -163,13 +163,19 @@ func TestRewriteBareAttachArgs(t *testing.T) {
 }
 
 func TestIsIndexLiteral(t *testing.T) {
-	yes := []string{"0", "1", "12", "9999"}
+	yes := []string{"0", "1", "12", "9999", "999999"}
 	for _, s := range yes {
 		if !isIndexLiteral(s) {
 			t.Errorf("isIndexLiteral(%q) = false, want true", s)
 		}
 	}
-	no := []string{"", "dev", "s-deadbeef", "0a", "-1", " 0", "0 ", "1.0"}
+	// Excluded: non-digits, leading zeros (real names like "007"), and
+	// over-long inputs that would silently overflow strconv.Atoi.
+	no := []string{
+		"", "dev", "s-deadbeef", "0a", "-1", " 0", "0 ", "1.0",
+		"007", "00", "0123",
+		"1234567", "99999999999999999999",
+	}
 	for _, s := range no {
 		if isIndexLiteral(s) {
 			t.Errorf("isIndexLiteral(%q) = true, want false", s)

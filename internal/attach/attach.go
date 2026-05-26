@@ -176,6 +176,19 @@ const (
 func Run(ctx context.Context, o Options) error {
 	o.defaults()
 
+	// OnClose runs on every exit path via this defer, including the early
+	// errors below. The caller's ensureSession has already created a remote
+	// session by the time Run is reached, so an unhandled early error would
+	// orphan it on the agent. Defaulting to IntentClose drives the caller's
+	// release/kill on ephemeral and a harmless no-op-unlease on --keep; the
+	// switch on the close reason later overrides this for the normal paths.
+	intent := IntentClose
+	defer func() {
+		if o.OnClose != nil {
+			o.OnClose(intent)
+		}
+	}()
+
 	if !term.IsTerminal(int(o.In.Fd())) {
 		return errors.New("attach: stdin is not a terminal")
 	}
@@ -287,7 +300,6 @@ func Run(ctx context.Context, o Options) error {
 
 	reason := <-done
 
-	var intent Intent
 	switch reason {
 	case reasonCloseMash, reasonSignal:
 		intent = IntentClose
@@ -322,9 +334,7 @@ func Run(ctx context.Context, o Options) error {
 	}
 
 	restore()
-	if o.OnClose != nil {
-		o.OnClose(intent)
-	}
+	// OnClose is invoked from the top-of-function defer with the final intent.
 	return nil
 }
 

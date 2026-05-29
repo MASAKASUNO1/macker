@@ -81,6 +81,8 @@ go install github.com/masakasuno1/macker/cmd/macker@latest
 macker ls                       # 誰がオンラインで何が動いているか
 macker mac-mini                 # そのマシンで新しいセッションを開く(ウィンドウ1つにつき1セッション)
 macker mac-mini:dev             # 名前付きの再 attach 可能なセッションに入る(無ければ作成)
+macker mac-mini dev             # 同じ。コロンの代わりにスペースで指定する形式
+macker mac-mini 0               # `macker mac-mini ls` で 0 番目に出ているセッションへ attach
 macker mac-mini ls              # そのマシンのセッションを詳細表示(clear/attach の判断用)
 macker mac-mini:dev clear       # そのセッションをリセット(次の attach は新規)
 macker exec macbook -- git pull # ノード上で認可付きコマンドを1つ実行
@@ -115,6 +117,10 @@ macker grid self mac-mini macbook mac-mini-2
 macker <node>                     ノードで新しいセッションを開く(ウィンドウ1つにつき1つ。
                                   閉じるとそのセッションだけが kill される)
 macker <node>:<session>           名前付きの再 attach 可能なセッションに attach(無ければ作成)
+macker <node> <session>           同じ。コロンの代わりにスペースで区切る形式
+macker <node> <index>             `macker <node> ls` の並び順(orphaned → detached → attached、
+                                  同状態は名前順)で N 番目のセッションに attach。
+                                  数字だけの名前("0" / "1" など)はこの形では指せない
 macker <node>[:<session>] clear   そのセッションをリセット(kill。次の attach は新規)
 macker ls                         ノードとそのセッション一覧(状態つき)
 macker <node> ls                  1ノードのセッションを詳細表示(clear/attach の判断用)
@@ -141,6 +147,18 @@ macker version                    バージョンを表示
 
 - **ctrl+c の連打**(400ms 以内に3回)、または
 - ターミナルの窓を閉じる(SIGHUP/SIGTERM)。
+
+セッションを **生かしたまま離脱したい** ときは:
+
+- **ctrl+j の連打**(300ms 以内に3回)→ クライアントだけ終了し、ephemeral でも
+  セッションは生き残ります。あとから `macker <node>:<session>` で再 attach できます
+  (名前付きで開始したセッションなら、また同じ名前で。auto セッションの場合は
+  `macker <node> ls` で名前を確認できます)。
+  ペーストや OS のキーリピートで誤発火しないように、ctrl+j のカウントは
+  (1) 「1 read につき最大 1 回」、(2) 「1 read 内に LF が複数あれば paste 扱いで
+  カウントしない」、(3) 「直前 hit から 50ms 未満なら paste 分割 / キーリピート
+  扱いでカウントしない」の 3 段で保護されています。人間の自然な連打 (80ms 以上の
+  間隔) は通ります。
 
 接続断やラップトップの sleep ではセッションは死なず、生き残って再 attach できます。
 `--keep` を付けると、明示的に閉じても kill ではなく detach だけになります。

@@ -47,6 +47,5 @@ func (s *Server) Serve(ctx context.Context) error {
 		Handler:           s.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
-	addrs := netutil.BindAddrs(ctx, s.ts, s.cfg.Listen)
-	return netutil.Serve(ctx, srv, addrs, "agent", Version)
+	return netutil.Serve(ctx, srv, s.ts, s.cfg.Listen, "agent", Version)
 }

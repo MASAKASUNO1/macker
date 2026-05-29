@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -68,6 +69,11 @@ func cmdAttach(ctx context.Context, args []string) error {
 	}
 
 	t := parseTarget(fs.Arg(0))
+	// Only a session that came from the positional target is eligible for
+	// numeric-index resolution. An explicit `--session 0` is the user asking
+	// for that literal name and must not be silently rewritten into the
+	// session at index 0.
+	indexable := isIndexLiteral(t.session)
 	if t.session == "" {
 		// No session in the target: use --session if given, otherwise a fresh
 		// unique one so each window is independent (1 window <-> 1 session).
@@ -87,8 +93,27 @@ func cmdAttach(ctx context.Context, args []string) error {
 		return err
 	}
 
-	// Ensure the session exists (create if missing).
-	if err := ensureSession(ctx, r, res, t.session, *command); err != nil {
+	// A purely numeric positional session reference is an index into
+	// `macker <node> ls`, resolved against the live list so the user can copy
+	// the position they just saw. Sessions whose names satisfy isIndexLiteral
+	// are therefore unreachable by the colon/space form — use --session for
+	// those.
+	resolvedFromIndex := false
+	if indexable {
+		idx, _ := strconv.Atoi(t.session) // safe: isIndexLiteral caps length
+		name, err := resolveSessionIndex(ctx, r, res, idx)
+		if err != nil {
+			return err
+		}
+		t.session = name
+		resolvedFromIndex = true
+	}
+
+	// Ensure the session exists. When the name came from an index, the user
+	// pointed at a row of a list that they just saw — recreating it under the
+	// same name (because the holder cleared it in the meantime) would land
+	// them in a blank shell silently, so require existence instead.
+	if err := ensureSession(ctx, r, res, t.session, *command, resolvedFromIndex); err != nil {
 		return err
 	}
 
@@ -103,11 +128,12 @@ func cmdAttach(ctx context.Context, args []string) error {
 		leaseSession(r, res, t.session, clientID, int(leaseTTL.Seconds()), ephemeral)
 	}
 
-	// On close: an intentional close of an ephemeral session kills it; anything
-	// else (—keep, or a natural detach/disconnect) releases the lease so the
-	// session lives on (and, if the holder vanished without this, goes orphaned).
-	onClose := func(intentional bool) {
-		if intentional && ephemeral {
+	// On close: an IntentClose on an ephemeral session kills it. Anything else
+	// — IntentDetach (ctrl+j mash), IntentNatural (clean detach / disconnect),
+	// or IntentClose on a --keep session — releases the lease so the session
+	// lives on (and, if the holder vanished without this, goes orphaned).
+	onClose := func(intent attach.Intent) {
+		if intent == attach.IntentClose && ephemeral {
 			releaseSession(r, res, t.session)
 			return
 		}
@@ -127,13 +153,16 @@ func cmdAttach(ctx context.Context, args []string) error {
 
 func lifecycleLabel(keep bool) string {
 	if keep {
-		return "keep; ctrl+c×3 or close detaches"
+		return "keep; ctrl+c×3, close, or ctrl+j×3 all detach"
 	}
-	return "ephemeral; ctrl+c×3 or close kills"
+	return "ephemeral; ctrl+c×3 or close kills, ctrl+j×3 detaches (session survives)"
 }
 
-// ensureSession makes sure the named session exists on the target.
-func ensureSession(ctx context.Context, r *resolver, res resolved, name, command string) error {
+// ensureSession makes sure the named session exists on the target. When
+// mustExist is true the session is NOT created if it's gone — this is for the
+// index path, where the user picked from a live list and a silent recreate
+// would drop them in an empty shell.
+func ensureSession(ctx context.Context, r *resolver, res resolved, name, command string, mustExist bool) error {
 	if res.local {
 		mgr := session.Manager{}
 		// Prefer the local agent for audit; fall back to direct tmux if it is
@@ -144,6 +173,9 @@ func ensureSession(ctx context.Context, r *resolver, res resolved, name, command
 		}
 		if exists {
 			return nil
+		}
+		if mustExist {
+			return fmt.Errorf("session %q is no longer on %s (it was cleared between list and attach)", name, res.name)
 		}
 		return mgr.New(ctx, name, command)
 	}
@@ -157,6 +189,9 @@ func ensureSession(ctx context.Context, r *resolver, res resolved, name, command
 		if s.Name == name {
 			return nil
 		}
+	}
+	if mustExist {
+		return fmt.Errorf("session %q is no longer on %s (it was cleared between list and attach)", name, res.name)
 	}
 	_, err = c.CreateSession(ctx, res.host, api.CreateSessionRequest{
 		Name: name, Command: command, Ephemeral: true,
@@ -308,4 +343,46 @@ func setPaneTitle(ctx context.Context, tmuxBin, sock, paneID, title string) {
 		return
 	}
 	_ = exec.CommandContext(ctx, tmuxBin, "-L", sock, "select-pane", "-t", paneID, "-T", title).Run()
+}
+
+// isIndexLiteral reports whether s is the canonical decimal representation of
+// a non-negative int and small enough to use as an index — the shape that
+// `macker <node> <N>` reserves for "index into the session list". Leading
+// zeros ("007") and overly long inputs ("99999999999999999999") are NOT
+// indices: they would either alias real session names that happen to be all
+// digits, or overflow strconv.Atoi silently and resolve to a wrong session.
+func isIndexLiteral(s string) bool {
+	if s == "" || len(s) > 6 { // 6 digits = 999,999 sessions; plenty
+		return false
+	}
+	if len(s) > 1 && s[0] == '0' { // "007", "01", … are names, not indices
+		return false
+	}
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// resolveSessionIndex maps a 0-based index into the same ordered list that
+// `macker <node> ls` displays (see sortSessionViewsForDisplay). Lookup goes
+// through the agent so it sees real lifecycle state — if the agent is not
+// reachable, indexing is not available and we say so explicitly.
+func resolveSessionIndex(ctx context.Context, r *resolver, res resolved, idx int) (string, error) {
+	cctx, cancel := context.WithTimeout(ctx, 4*time.Second)
+	defer cancel()
+	resp, err := newClient(r.cfg).ListSessions(cctx, res.host)
+	if err != nil {
+		return "", fmt.Errorf("could not list sessions on %s to resolve index — is its agent running? (%w)", res.name, err)
+	}
+	if len(resp.Sessions) == 0 {
+		return "", fmt.Errorf("%s has no sessions to index", res.name)
+	}
+	sortSessionViewsForDisplay(resp.Sessions)
+	if idx < 0 || idx >= len(resp.Sessions) {
+		return "", fmt.Errorf("session index %d out of range on %s (have 0..%d)", idx, res.name, len(resp.Sessions)-1)
+	}
+	return resp.Sessions[idx].Name, nil
 }

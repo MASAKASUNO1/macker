@@ -124,8 +124,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 // ":port" binds only loopback + Tailscale IPs (not every LAN interface).
 func (s *Server) Serve(ctx context.Context, listen string) error {
 	srv := &http.Server{Handler: s.Handler(), ReadHeaderTimeout: 10 * time.Second}
-	addrs := netutil.BindAddrs(ctx, s.ts, listen)
-	return netutil.Serve(ctx, srv, addrs, "collector", Version)
+	return netutil.Serve(ctx, srv, s.ts, listen, "collector", Version)
 }
 
 // --- helpers ---

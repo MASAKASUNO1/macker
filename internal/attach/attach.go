@@ -2,12 +2,14 @@
 // local) tmux session and implements macker's session lifecycle gestures.
 //
 // Lifecycle model (DESIGN.md §4): a session is killed ONLY on an explicit
-// intent signal — a ctrl+c mash or the terminal window closing (SIGHUP/SIGTERM).
-// A natural client exit (e.g. a tmux detach) or a dropped connection never
-// kills the session, so sleeping the laptop preserves it. The kill itself is
-// performed by OnIntentionalClose, which the caller wires to the agent's
-// release endpoint for ephemeral sessions, or leaves nil for --keep sessions
-// (where an intentional close merely detaches).
+// close intent — a ctrl+c mash or the terminal window closing (SIGHUP/SIGTERM).
+// A ctrl+j mash is an intentional detach that leaves the session alive (handy
+// when you want to step away without killing an ephemeral session). A natural
+// client exit (e.g. a tmux detach) or a dropped connection never kills the
+// session either, so sleeping the laptop preserves it. The kill itself is
+// performed by the OnClose callback, which the caller wires to the agent's
+// release endpoint for IntentClose on ephemeral sessions; IntentDetach and
+// IntentNatural only drop the lease.
 package attach
 
 import (
@@ -39,10 +41,33 @@ type Options struct {
 	// SSHArgs are extra ssh options for remote attach.
 	SSHArgs []string
 
-	// MashCount and MashWindow define the ctrl+c mash gesture: this many
+	// MashCount and MashWindow define the ctrl+c close gesture: this many
 	// ctrl+c bytes within the window triggers an intentional close.
 	MashCount  int
 	MashWindow time.Duration
+
+	// DetachMashCount and DetachMashWindow define the ctrl+j detach gesture:
+	// this many ctrl+j bytes within the window, each in a SEPARATE read from
+	// stdin, trigger an intentional detach (session is left alive even if
+	// ephemeral). The per-read restriction avoids false positives when pasted
+	// text contains LF bytes — a multi-line paste is delivered as one big read
+	// (or a few large reads with no real key pause between them).
+	DetachMashCount  int
+	DetachMashWindow time.Duration
+
+	// DetachMinGap is the minimum spacing between two consecutive detach hits.
+	// Reads that arrive faster than this are treated as either OS key-repeat
+	// (~30-50ms/repeat) or a paste split across reads — both should not count
+	// as a human mash. A natural human mash is 80ms+ between presses, so
+	// 50ms gives comfortable headroom.
+	DetachMinGap time.Duration
+
+	// GraceShutdown is how long Run waits for the child to exit after SIGTERM
+	// before falling back to SIGKILL on an intentional close/detach. Giving the
+	// local ssh/tmux client a moment to shut down cleanly lets remote sshd
+	// close the session cleanly (so a remote tmux with destroy-unattached or
+	// similar is less likely to misinterpret the disconnect).
+	GraceShutdown time.Duration
 
 	// LeaseRenew, if non-nil, is called once at start and then every
 	// LeaseInterval to refresh the session lease (heartbeat). When the heartbeat
@@ -51,18 +76,35 @@ type Options struct {
 	LeaseRenew    func()
 	LeaseInterval time.Duration
 
-	// OnClose is invoked exactly once when the attachment ends. intentional is
-	// true for a ctrl+c mash or window close, false for a natural exit (tmux
-	// detach / session end). The caller decides policy: kill on intentional+
-	// ephemeral, otherwise release the lease (clean detach).
-	OnClose func(intentional bool)
+	// OnClose is invoked exactly once when the attachment ends. The caller
+	// decides policy from the intent: kill on IntentClose+ephemeral, otherwise
+	// release the lease (clean detach).
+	OnClose func(intent Intent)
 
 	// In, Out are the local terminal; defaults to os.Stdin/os.Stdout.
 	In  *os.File
 	Out *os.File
 }
 
-const ctrlC = 0x03
+const (
+	ctrlC = 0x03
+	ctrlJ = 0x0a // == LF == '\n'; this is why paste guards are critical.
+)
+
+// Intent describes why the attachment ended; OnClose uses it to choose
+// between kill, lease release, or no-op.
+type Intent int
+
+const (
+	// IntentNatural: child exited on its own (tmux detach, ssh dropped, etc.).
+	IntentNatural Intent = iota
+	// IntentClose: ctrl+c mash or terminal window close — the user wants the
+	// session gone (callers kill on ephemeral, detach on --keep).
+	IntentClose
+	// IntentDetach: ctrl+j mash — the user wants to step away while leaving
+	// the session alive, even when ephemeral.
+	IntentDetach
+)
 
 func (o *Options) defaults() {
 	if o.MashCount <= 0 {
@@ -70,6 +112,18 @@ func (o *Options) defaults() {
 	}
 	if o.MashWindow <= 0 {
 		o.MashWindow = 400 * time.Millisecond
+	}
+	if o.DetachMashCount <= 0 {
+		o.DetachMashCount = 3
+	}
+	if o.DetachMashWindow <= 0 {
+		o.DetachMashWindow = 300 * time.Millisecond
+	}
+	if o.DetachMinGap <= 0 {
+		o.DetachMinGap = 50 * time.Millisecond
+	}
+	if o.GraceShutdown <= 0 {
+		o.GraceShutdown = 500 * time.Millisecond
 	}
 	if o.In == nil {
 		o.In = os.Stdin
@@ -112,14 +166,28 @@ func shellQuote(s string) string {
 type closeReason int
 
 const (
-	reasonChildExit closeReason = iota // tmux/ssh exited on its own (detach/end)
-	reasonMash                         // user mashed ctrl+c
-	reasonSignal                       // terminal window closed
+	reasonChildExit  closeReason = iota // tmux/ssh exited on its own (detach/end)
+	reasonCloseMash                     // user mashed ctrl+c (kill)
+	reasonDetachMash                    // user mashed ctrl+j (detach, session survives)
+	reasonSignal                        // terminal window closed
 )
 
 // Run attaches and blocks until the session is detached, ends, or is closed.
 func Run(ctx context.Context, o Options) error {
 	o.defaults()
+
+	// OnClose runs on every exit path via this defer, including the early
+	// errors below. The caller's ensureSession has already created a remote
+	// session by the time Run is reached, so an unhandled early error would
+	// orphan it on the agent. Defaulting to IntentClose drives the caller's
+	// release/kill on ephemeral and a harmless no-op-unlease on --keep; the
+	// switch on the close reason later overrides this for the normal paths.
+	intent := IntentClose
+	defer func() {
+		if o.OnClose != nil {
+			o.OnClose(intent)
+		}
+	}()
 
 	if !term.IsTerminal(int(o.In.Fd())) {
 		return errors.New("attach: stdin is not a terminal")
@@ -187,6 +255,8 @@ func Run(ctx context.Context, o Options) error {
 	signal.Notify(sigCh, syscall.SIGHUP, syscall.SIGTERM)
 	defer signal.Stop(sigCh)
 
+	// 3 producers (child reader, input forwarder, signal watcher), each can
+	// send at most once — buffered so a late send never blocks.
 	done := make(chan closeReason, 3)
 
 	// child output -> screen; EOF means the child exited.
@@ -202,8 +272,24 @@ func Run(ctx context.Context, o Options) error {
 	// accumulate; grid spawns a separate process per pane rather than reusing
 	// Run in-process.
 	go func() {
-		if o.forwardInput(ptmx) {
-			done <- reasonMash
+		switch o.forwardInput(ptmx) {
+		case mashClose:
+			done <- reasonCloseMash
+		case mashDetach:
+			done <- reasonDetachMash
+		case mashStdinClosed:
+			// Stdin EOF/error = local terminal hung up. Route this to the
+			// same intent path as SIGHUP so a window-close still kills
+			// ephemeral sessions regardless of which goroutine wins.
+			done <- reasonSignal
+		case mashChildGone:
+			// Child wrote-side EOF — natural exit, mirror the reader.
+			done <- reasonChildExit
+		default:
+			// Defensive: a future mashKind would otherwise drop silently
+			// and let <-done deadlock. Treat the unknown case as child
+			// exit (no kill), matching the safe-side default.
+			done <- reasonChildExit
 		}
 	}()
 
@@ -214,54 +300,166 @@ func Run(ctx context.Context, o Options) error {
 
 	reason := <-done
 
-	intentional := reason == reasonMash || reason == reasonSignal
-	if intentional {
-		// Stop the local tmux/ssh client.
-		_ = cmd.Process.Kill()
+	switch reason {
+	case reasonCloseMash, reasonSignal:
+		intent = IntentClose
+	case reasonDetachMash:
+		intent = IntentDetach
+	default:
+		intent = IntentNatural
 	}
-	_, _ = cmd.Process.Wait()
+
+	// Wait for the child in a dedicated goroutine so we can race it against a
+	// grace period when we need to force-stop the local tmux/ssh client.
+	waitCh := make(chan struct{})
+	go func() {
+		_, _ = cmd.Process.Wait()
+		close(waitCh)
+	}()
+
+	if intent != IntentNatural {
+		// Graceful first: SIGTERM lets ssh tear down the remote session
+		// cleanly (no PTY-hangup race), so a remote tmux with
+		// destroy-unattached/exit-empty won't misread the disconnect as
+		// "session went away". If the client doesn't exit in time, escalate.
+		_ = cmd.Process.Signal(syscall.SIGTERM)
+		select {
+		case <-waitCh:
+		case <-time.After(o.GraceShutdown):
+			_ = cmd.Process.Kill()
+			<-waitCh
+		}
+	} else {
+		<-waitCh
+	}
+
 	restore()
-	if o.OnClose != nil {
-		o.OnClose(intentional)
-	}
+	// OnClose is invoked from the top-of-function defer with the final intent.
 	return nil
 }
 
-// forwardInput copies keyboard input to the child and watches for a ctrl+c
-// mash. It returns true if the mash gesture fired. Every byte (including each
-// ctrl+c) is forwarded so a single ctrl+c still interrupts the remote program
-// normally.
-func (o *Options) forwardInput(w io.Writer) bool {
+// mashKind reports how forwardInput exited.
+type mashKind int
+
+const (
+	// mashClose: ctrl+c mash fired (intentional close).
+	mashClose mashKind = iota + 1
+	// mashDetach: ctrl+j mash fired (intentional detach, session survives).
+	mashDetach
+	// mashStdinClosed: read on stdin returned an error. The local terminal
+	// is gone (the window was closed, or stdin was redirected and EOFed) —
+	// treat it as a close signal so ephemeral sessions are still killed even
+	// if the SIGHUP goroutine loses the race to deliver its reason first.
+	mashStdinClosed
+	// mashChildGone: write to the child pty failed. The remote/child side
+	// went away on its own — that's a natural exit (no kill).
+	mashChildGone
+)
+
+// mashTracker tracks repeated byte hits within a sliding window.
+type mashTracker struct {
+	window time.Duration
+	count  int
+	hits   []time.Time
+}
+
+// record adds a hit at now, evicts hits older than the window, and reports
+// whether the threshold is now met.
+func (m *mashTracker) record(now time.Time) bool {
+	m.hits = append(m.hits, now)
+	cutoff := now.Add(-m.window)
+	kept := m.hits[:0]
+	for _, t := range m.hits {
+		if t.After(cutoff) {
+			kept = append(kept, t)
+		}
+	}
+	m.hits = kept
+	return len(m.hits) >= m.count
+}
+
+// forwardInput copies keyboard input to the child and watches for both the
+// ctrl+c close mash and the ctrl+j detach mash. Every byte (including each
+// ctrl+c / ctrl+j) is forwarded so a single press still reaches the remote
+// program normally.
+//
+// Detach (ctrl+j == LF) is fragile because LF bytes show up in pasted text
+// and in OS key-repeat, neither of which is a real "mash". Three guards keep
+// the heuristic honest:
+//
+//  1. **Per-read cap**: at most one ctrl+j hit is counted per Read call. A
+//     normal multi-line paste lands in one big read, so its many LFs only
+//     contribute one (filtered, see #2) candidate.
+//  2. **Paste-shape filter**: if a single read contains more than one LF, it
+//     looks like text, not a mash — skip it entirely.
+//  3. **Inter-read min gap**: a read that arrives less than DetachMinGap
+//     after the previous detach hit is treated as key-repeat or a paste
+//     split across reads, and is not counted. A human mash is 80ms+ between
+//     presses; key-repeat is 30-50ms/repeat.
+//
+// Ctrl+c uses the same per-read cap (rare but possible to mistype repeats)
+// and is otherwise unguarded — control bytes don't show up in normal paste
+// text and the user kill intent is unambiguous when they hit it three times.
+func (o *Options) forwardInput(w io.Writer) mashKind {
 	buf := make([]byte, 4096)
-	var hits []time.Time
+	closeT := mashTracker{window: o.MashWindow, count: o.MashCount}
+	detachT := mashTracker{window: o.DetachMashWindow, count: o.DetachMashCount}
+	var lastDetachHit time.Time
 	for {
 		n, err := o.In.Read(buf)
 		if n > 0 {
 			now := time.Now()
+			var sawClose bool
+			var detachByteCount int
 			for _, b := range buf[:n] {
-				if b == ctrlC {
-					hits = append(hits, now)
+				switch b {
+				case ctrlC:
+					sawClose = true
+				case ctrlJ:
+					detachByteCount++
 				}
 			}
-			// Drop hits older than the window.
-			cutoff := now.Add(-o.MashWindow)
-			kept := hits[:0]
-			for _, t := range hits {
-				if t.After(cutoff) {
-					kept = append(kept, t)
+
+			// A detach hit must satisfy all three guards: per-read cap
+			// (detachByteCount == 1), paste-shape filter (>=2 LFs means paste,
+			// not mash), and inter-read min gap. Any read containing LF —
+			// even one that fails the guards — advances lastDetachHit so a
+			// long chunked paste keeps the gap clock ticking; otherwise a
+			// stream of single-LF reads arriving every 20ms would still
+			// accumulate three hits at the 50ms sampling rate set by the gap.
+			var gotClose, gotDetach bool
+			if sawClose {
+				gotClose = closeT.record(now)
+			}
+			if detachByteCount > 0 {
+				qualifying := detachByteCount == 1 &&
+					(lastDetachHit.IsZero() || now.Sub(lastDetachHit) >= o.DetachMinGap)
+				lastDetachHit = now
+				if qualifying {
+					gotDetach = detachT.record(now)
 				}
 			}
-			hits = kept
 
 			if _, werr := w.Write(buf[:n]); werr != nil {
-				return false
+				// Write side died: the child (ssh/tmux) went away on its
+				// own. Natural exit, no kill.
+				return mashChildGone
 			}
-			if len(hits) >= o.MashCount {
-				return true
+			// Close wins if both fire in the same read (kill is a stronger
+			// signal than detach).
+			if gotClose {
+				return mashClose
+			}
+			if gotDetach {
+				return mashDetach
 			}
 		}
 		if err != nil {
-			return false
+			// Read side died: the local terminal hung up (window closed)
+			// or stdin was redirected and EOFed. Either way we have no
+			// terminal anymore — escalate to a close signal so an ephemeral
+			// session still gets killed even if SIGHUP loses the race.
+			return mashStdinClosed
 		}
 	}
 }

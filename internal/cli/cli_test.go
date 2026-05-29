@@ -124,6 +124,65 @@ func TestShellJoin(t *testing.T) {
 	}
 }
 
+func TestRewriteBareAttachArgs(t *testing.T) {
+	tests := []struct {
+		name     string
+		cmd      string
+		rest     []string
+		wantTgt  string
+		wantArgs []string
+	}{
+		{"bare node", "mac-mini", nil, "mac-mini", nil},
+		{"colon target only", "mac-mini:dev", nil, "mac-mini:dev", nil},
+		{"space-form session", "mac-mini", []string{"dev"}, "mac-mini:dev", nil},
+		{"space-form index", "mac-mini", []string{"0"}, "mac-mini:0", nil},
+		{"keep flag only", "mac-mini", []string{"--keep"}, "mac-mini", []string{"--keep"}},
+		{"flag then session", "mac-mini", []string{"--keep", "dev"}, "mac-mini:dev", []string{"--keep"}},
+		{"session then flag", "mac-mini", []string{"dev", "--keep"}, "mac-mini:dev", []string{"--keep"}},
+		{"colon target with flag", "mac-mini:dev", []string{"--keep"}, "mac-mini:dev", []string{"--keep"}},
+		{"colon target ignores extra", "mac-mini:dev", []string{"other"}, "mac-mini:dev", []string{"other"}},
+		{"extra non-flag passes through", "mac-mini", []string{"dev", "stray"}, "mac-mini:dev", []string{"stray"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotTgt, gotArgs := rewriteBareAttachArgs(tt.cmd, tt.rest)
+			if gotTgt != tt.wantTgt {
+				t.Errorf("target = %q, want %q", gotTgt, tt.wantTgt)
+			}
+			if len(gotArgs) != len(tt.wantArgs) {
+				t.Errorf("flags = %v, want %v", gotArgs, tt.wantArgs)
+			} else {
+				for i := range gotArgs {
+					if gotArgs[i] != tt.wantArgs[i] {
+						t.Errorf("flag %d = %q, want %q", i, gotArgs[i], tt.wantArgs[i])
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestIsIndexLiteral(t *testing.T) {
+	yes := []string{"0", "1", "12", "9999", "999999"}
+	for _, s := range yes {
+		if !isIndexLiteral(s) {
+			t.Errorf("isIndexLiteral(%q) = false, want true", s)
+		}
+	}
+	// Excluded: non-digits, leading zeros (real names like "007"), and
+	// over-long inputs that would silently overflow strconv.Atoi.
+	no := []string{
+		"", "dev", "s-deadbeef", "0a", "-1", " 0", "0 ", "1.0",
+		"007", "00", "0123",
+		"1234567", "99999999999999999999",
+	}
+	for _, s := range no {
+		if isIndexLiteral(s) {
+			t.Errorf("isIndexLiteral(%q) = true, want false", s)
+		}
+	}
+}
+
 func TestIsAutoSession(t *testing.T) {
 	auto := []string{"s-00000000", "s-deadbeef", "s-ff5521da"}
 	for _, n := range auto {

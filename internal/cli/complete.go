@@ -116,8 +116,14 @@ _macker() {
       (( CURRENT == 3 )) && compadd -- zsh
       ;;
     *)
-      # bare node form: macker <node> <clear|ls>
-      (( CURRENT == 3 )) && compadd -- clear ls
+      # bare node form: macker <node> <clear|ls|session|index>
+      if (( CURRENT == 3 )); then
+        local node=${words[2]%%:*}
+        local -a sess
+        sess=(${(f)"$(macker __complete sessions $node 2>/dev/null)"})
+        compadd -- clear ls
+        _describe -t sessions 'session' sess
+      fi
       ;;
   esac
 }
